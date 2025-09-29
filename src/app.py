@@ -268,7 +268,12 @@ class DatabaseManager:
             # Insert initial metadata
             await conn.execute("""
                 INSERT INTO table_sync_metadata (key, value) 
-                VALUES ('schema_version', '{"version": "1.0.0", "initialized_at": "' || NOW() || '"}')
+                VALUES ('schema_version', 
+                    jsonb_build_object(
+                        'version', '1.0.0',
+                        'initialized_at', NOW()::text
+                    )
+                )
                 ON CONFLICT (key) DO NOTHING;
             """)
             
