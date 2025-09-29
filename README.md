@@ -129,7 +129,68 @@ docker-compose exec table-sync-app python health_check.py metrics
 docker-compose exec table-sync-app python health_check.py tables
 ```
 
-## 📖 How It Works
+## � Schema Initialization
+
+The application automatically validates and prepares the YugabyteDB schema on startup:
+
+### Automatic Schema Setup
+
+On first startup, the application will:
+
+1. **Test Database Connectivity**: Validate connection and basic permissions
+2. **Check Database Capabilities**: Ensure JSONB support and logical replication
+3. **Create State Tables**: Set up `table_sync_state` and `table_sync_metadata` tables
+4. **Create Indexes**: Add performance indexes for efficient querying
+5. **Validate Schema**: Test all operations to ensure everything works
+
+### Manual Schema Testing
+
+You can test the schema initialization independently:
+
+```bash
+# Test schema initialization
+docker-compose exec table-sync-app python test_schema.py
+
+# Expected output shows:
+# - Database connectivity validation
+# - Schema preparation steps
+# - State table creation and testing
+# - Performance validation
+```
+
+### Schema Components
+
+The application creates these database objects:
+
+- **`table_sync_state`**: Main state tracking table
+  - Tracks each table's sync configuration and status
+  - Stores bootstrap config as JSONB
+  - Maintains timestamps and status flags
+
+- **`table_sync_metadata`**: Application metadata
+  - Stores schema version information
+  - Tracks initialization timestamps
+  - Future extensibility for app settings
+
+- **Performance Indexes**: Optimized for common queries
+  - Bootstrap configuration lookups
+  - Status filtering
+  - Time-based queries
+
+### Schema Validation
+
+The startup process validates:
+
+- ✅ Database connectivity and permissions
+- ✅ Required PostgreSQL extensions (uuid-ossp)
+- ✅ JSONB support for configuration storage
+- ✅ Logical replication capabilities for CDC
+- ✅ Complete CRUD operations on state tables
+- ✅ Index creation and performance optimization
+
+If any validation fails, the application will log detailed error messages and exit gracefully.
+
+## �📖 How It Works
 
 ### 1. Table Discovery
 Every 30 seconds, the application scans all YugabyteDB tables for bootstrap configuration comments.

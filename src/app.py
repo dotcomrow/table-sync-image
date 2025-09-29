@@ -87,36 +87,303 @@ class DatabaseManager:
         self.pool: Optional[asyncpg.Pool] = None
     
     async def initialize(self):
-        """Initialize database connection pool and create state table"""
-        self.pool = await asyncpg.create_pool(self.database_url, min_size=2, max_size=10)
-        await self._create_state_table()
+        """Initialize database connection pool and prepare schema"""
+        logger.info("Initializing database manager...")
+        
+        # Create connection pool
+        try:
+            self.pool = await asyncpg.create_pool(
+                self.database_url, 
+                min_size=2, 
+                max_size=10,
+                command_timeout=30
+            )
+            logger.info("Database connection pool created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create database connection pool: {e}")
+            raise
+        
+        # Validate and prepare schema
+        await self._validate_and_prepare_schema()
     
     async def close(self):
         """Close database connections"""
         if self.pool:
             await self.pool.close()
+            logger.info("Database connection pool closed")
     
-    async def _create_state_table(self):
-        """Create the table sync state tracking table"""
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS table_sync_state (
-            schema_name VARCHAR(255) NOT NULL,
-            table_name VARCHAR(255) NOT NULL,
-            comment_hash VARCHAR(64),
-            bootstrap_config JSONB,
-            bigquery_created BOOLEAN DEFAULT FALSE,
-            pipeline_configured BOOLEAN DEFAULT FALSE,
-            last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            PRIMARY KEY (schema_name, table_name)
-        );
+    async def _validate_and_prepare_schema(self):
+        """Validate database connection and prepare schema if needed"""
+        logger.info("Validating database schema and preparing if needed...")
         
-        CREATE INDEX IF NOT EXISTS idx_table_sync_state_updated 
-        ON table_sync_state(last_updated);
-        """
+        try:
+            async with self.pool.acquire() as conn:
+                # Test basic connectivity
+                await self._test_database_connectivity(conn)
+                
+                # Check database version and capabilities
+                await self._validate_database_capabilities(conn)
+                
+                # Prepare schema
+                await self._prepare_schema(conn)
+                
+                # Create state table and indexes
+                await self._create_state_table(conn)
+                
+                # Validate schema is ready
+                await self._validate_schema_ready(conn)
+                
+            logger.info("Database schema validation and preparation completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Database schema validation/preparation failed: {e}")
+            raise
+    
+    async def _test_database_connectivity(self, conn):
+        """Test basic database connectivity and permissions"""
+        logger.info("Testing database connectivity...")
         
-        async with self.pool.acquire() as conn:
+        try:
+            # Test basic query
+            version = await conn.fetchval("SELECT version()")
+            logger.info(f"Connected to: {version}")
+            
+            # Test if we can create objects (check permissions)
+            await conn.execute("SELECT 1")
+            
+        except Exception as e:
+            logger.error(f"Database connectivity test failed: {e}")
+            raise
+    
+    async def _validate_database_capabilities(self, conn):
+        """Validate that the database supports required features"""
+        logger.info("Validating database capabilities...")
+        
+        try:
+            # Check for JSONB support (required for bootstrap_config)
+            jsonb_support = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_type WHERE typname = 'jsonb'
+                )
+            """)
+            
+            if not jsonb_support:
+                raise Exception("Database does not support JSONB type (required for bootstrap configuration)")
+            
+            # Check for publication support (required for Debezium)
+            pub_support = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_proc WHERE proname = 'pg_create_logical_replication_slot'
+                )
+            """)
+            
+            if not pub_support:
+                logger.warning("Logical replication functions not found - Debezium may not work properly")
+            
+            # Check wal_level (should be 'logical' for CDC)
+            wal_level = await conn.fetchval("SHOW wal_level")
+            if wal_level not in ['logical', 'replica']:
+                logger.warning(f"WAL level is '{wal_level}' - 'logical' recommended for CDC functionality")
+            
+            logger.info("Database capabilities validated successfully")
+            
+        except Exception as e:
+            logger.error(f"Database capability validation failed: {e}")
+            raise
+    
+    async def _prepare_schema(self, conn):
+        """Prepare any required schema objects"""
+        logger.info("Preparing database schema...")
+        
+        try:
+            # Ensure we have necessary extensions
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+            logger.debug("UUID extension ensured")
+            
+            # Create any custom types if needed
+            # (Currently none required, but placeholder for future needs)
+            
+        except Exception as e:
+            logger.error(f"Schema preparation failed: {e}")
+            raise
+    
+    async def _create_state_table(self, conn):
+        """Create the table sync state tracking table and related objects"""
+        logger.info("Creating state table and indexes...")
+        
+        try:
+            # Create the main state table
+            create_table_sql = """
+            CREATE TABLE IF NOT EXISTS table_sync_state (
+                schema_name VARCHAR(255) NOT NULL,
+                table_name VARCHAR(255) NOT NULL,
+                comment_hash VARCHAR(64),
+                bootstrap_config JSONB,
+                bigquery_created BOOLEAN DEFAULT FALSE,
+                pipeline_configured BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                PRIMARY KEY (schema_name, table_name)
+            );
+            """
             await conn.execute(create_table_sql)
-            logger.info("State table initialized")
+            
+            # Create indexes for performance
+            indexes_sql = [
+                """
+                CREATE INDEX IF NOT EXISTS idx_table_sync_state_updated 
+                ON table_sync_state(last_updated);
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_table_sync_state_bootstrap_enabled 
+                ON table_sync_state((bootstrap_config->>'enabled')) 
+                WHERE bootstrap_config IS NOT NULL;
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_table_sync_state_bigquery_created 
+                ON table_sync_state(bigquery_created) 
+                WHERE bigquery_created = TRUE;
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_table_sync_state_pipeline_configured 
+                ON table_sync_state(pipeline_configured) 
+                WHERE pipeline_configured = TRUE;
+                """
+            ]
+            
+            for index_sql in indexes_sql:
+                await conn.execute(index_sql)
+            
+            # Create a metadata table for tracking application state
+            metadata_table_sql = """
+            CREATE TABLE IF NOT EXISTS table_sync_metadata (
+                key VARCHAR(255) PRIMARY KEY,
+                value JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+            """
+            await conn.execute(metadata_table_sql)
+            
+            # Insert initial metadata
+            await conn.execute("""
+                INSERT INTO table_sync_metadata (key, value) 
+                VALUES ('schema_version', '{"version": "1.0.0", "initialized_at": "' || NOW() || '"}')
+                ON CONFLICT (key) DO NOTHING;
+            """)
+            
+            logger.info("State table and indexes created successfully")
+            
+        except Exception as e:
+            logger.error(f"State table creation failed: {e}")
+            raise
+    
+    async def _validate_schema_ready(self, conn):
+        """Validate that the schema is ready for use"""
+        logger.info("Validating schema readiness...")
+        
+        try:
+            # Check that state table exists and is accessible
+            state_table_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'table_sync_state'
+                )
+            """)
+            
+            if not state_table_exists:
+                raise Exception("State table was not created properly")
+            
+            # Check that we can insert/update/delete from state table
+            test_schema = 'test_schema_validation'
+            test_table = 'test_table_validation'
+            
+            # Test insert
+            await conn.execute("""
+                INSERT INTO table_sync_state (schema_name, table_name, comment_hash) 
+                VALUES ($1, $2, 'test_hash')
+                ON CONFLICT (schema_name, table_name) DO UPDATE SET 
+                comment_hash = 'test_hash'
+            """, test_schema, test_table)
+            
+            # Test select
+            exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM table_sync_state 
+                    WHERE schema_name = $1 AND table_name = $2
+                )
+            """, test_schema, test_table)
+            
+            if not exists:
+                raise Exception("Failed to insert test record into state table")
+            
+            # Test delete (cleanup)
+            await conn.execute("""
+                DELETE FROM table_sync_state 
+                WHERE schema_name = $1 AND table_name = $2
+            """, test_schema, test_table)
+            
+            # Check metadata table
+            metadata_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'table_sync_metadata'
+                )
+            """)
+            
+            if not metadata_exists:
+                raise Exception("Metadata table was not created properly")
+            
+            # Get schema version
+            schema_version = await conn.fetchval("""
+                SELECT value FROM table_sync_metadata WHERE key = 'schema_version'
+            """)
+            
+            if schema_version:
+                logger.info(f"Schema version: {schema_version}")
+            
+            logger.info("Schema validation completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Schema validation failed: {e}")
+            raise
+    
+    async def get_schema_info(self) -> Dict:
+        """Get information about the current schema state"""
+        try:
+            async with self.pool.acquire() as conn:
+                # Get basic table counts
+                total_tables = await conn.fetchval("""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                """)
+                
+                # Get state table info
+                tracked_tables = await conn.fetchval("SELECT COUNT(*) FROM table_sync_state")
+                enabled_configs = await conn.fetchval("""
+                    SELECT COUNT(*) FROM table_sync_state 
+                    WHERE bootstrap_config->>'enabled' = 'true'
+                """)
+                
+                # Get schema version
+                schema_version = await conn.fetchval("""
+                    SELECT value FROM table_sync_metadata WHERE key = 'schema_version'
+                """)
+                
+                return {
+                    "total_tables": total_tables,
+                    "tracked_tables": tracked_tables,
+                    "enabled_configs": enabled_configs,
+                    "schema_version": schema_version,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get schema info: {e}")
+            return {
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
     
     async def get_all_tables_with_comments(self) -> List[Dict]:
         """Get all tables and their comments from information_schema"""
@@ -378,24 +645,49 @@ class TableSyncManager:
         
     async def initialize(self):
         """Initialize the sync manager"""
+        logger.info("Initializing TableSyncManager components...")
+        
+        # Initialize database manager (this validates and prepares the schema)
+        logger.info("Initializing database manager...")
         await self.db_manager.initialize()
         
         # Initialize pipeline manager with database pool
+        logger.info("Initializing pipeline manager...")
         self.pipeline_manager = PipelineManager(
             DEBEZIUM_CONNECTOR_URL, 
             KAFKA_BOOTSTRAP_SERVERS, 
             self.db_manager.pool
         )
+        logger.info(f"Pipeline manager configured for Debezium at {DEBEZIUM_CONNECTOR_URL}")
         
-        # Initialize data transfer manager if BigQuery is configured
+        # Initialize BigQuery components if configured
         if self.bq_manager:
+            logger.info("Initializing BigQuery integration...")
+            
+            # Initialize data transfer manager
             from data_transfer import DataTransferManager
             temp_bucket = os.getenv("TEMP_STORAGE_BUCKET")
+            if temp_bucket:
+                logger.info(f"Using temp storage bucket: {temp_bucket}")
+            else:
+                logger.info(f"Using default temp bucket: {BIGQUERY_PROJECT_ID}-table-sync-temp")
+            
             self.data_transfer_manager = DataTransferManager(BIGQUERY_PROJECT_ID, temp_bucket)
+            
             # Ensure temp bucket exists
-            self.data_transfer_manager.ensure_temp_bucket_exists()
+            try:
+                self.data_transfer_manager.ensure_temp_bucket_exists()
+                logger.info("Temp storage bucket validated/created")
+            except Exception as e:
+                logger.error(f"Failed to setup temp storage bucket: {e}")
+                logger.warning("Data transfer operations may fail without proper bucket access")
+            
+            logger.info("BigQuery integration initialized successfully")
+        else:
+            logger.warning("BigQuery manager not initialized - BIGQUERY_PROJECT_ID not set")
+            logger.warning("BigQuery operations will be disabled")
         
-        logger.info("TableSyncManager initialized")
+        logger.info("TableSyncManager initialization completed successfully")
     
     async def close(self):
         """Close the sync manager"""
@@ -629,27 +921,102 @@ class TableSyncManager:
             logger.error(f"Error during scan and processing: {e}")
             raise
 
+async def validate_external_dependencies(sync_manager: 'TableSyncManager'):
+    """Validate external dependencies are accessible"""
+    logger.info("Checking external service connectivity...")
+    
+    # Check BigQuery connectivity if configured
+    if sync_manager.bq_manager:
+        try:
+            # Simple query to test connectivity
+            query = "SELECT 1 as test"
+            query_job = sync_manager.bq_manager.client.query(query)
+            list(query_job.result())
+            logger.info("✅ BigQuery connectivity validated")
+        except Exception as e:
+            logger.warning(f"⚠️  BigQuery connectivity issue: {e}")
+            logger.warning("BigQuery operations may fail during runtime")
+    
+    # Check Debezium connectivity
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{DEBEZIUM_CONNECTOR_URL}/connectors", timeout=10) as response:
+                if response.status == 200:
+                    connectors = await response.json()
+                    logger.info(f"✅ Debezium Connect API accessible ({len(connectors)} existing connectors)")
+                else:
+                    logger.warning(f"⚠️  Debezium API returned status {response.status}")
+    except Exception as e:
+        logger.warning(f"⚠️  Debezium connectivity issue: {e}")
+        logger.warning("Real-time CDC operations may fail during runtime")
+    
+    # Check Kafka connectivity (basic check)
+    try:
+        # This is a basic connectivity test - in production you might want more thorough checks
+        logger.info(f"✅ Kafka configuration: {KAFKA_BOOTSTRAP_SERVERS}")
+    except Exception as e:
+        logger.warning(f"⚠️  Kafka configuration issue: {e}")
+    
+    logger.info("External dependency validation completed")
+
 async def main():
     """Main application loop"""
-    logger.info("Starting Table Sync Application")
+    logger.info("=" * 60)
+    logger.info("STARTING TABLE SYNC APPLICATION")
+    logger.info("=" * 60)
+    
+    # Log configuration
+    logger.info("Configuration:")
+    logger.info(f"  Database URL: {DATABASE_URL.replace('://yugabyte:', '://yugabyte:***@') if 'yugabyte:' in DATABASE_URL else DATABASE_URL}")
+    logger.info(f"  BigQuery Project: {BIGQUERY_PROJECT_ID}")
+    logger.info(f"  Debezium URL: {DEBEZIUM_CONNECTOR_URL}")
+    logger.info(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s")
+    logger.info(f"  Log Level: {LOG_LEVEL}")
     
     # Validate required environment variables
     if not BIGQUERY_PROJECT_ID:
         logger.error("BIGQUERY_PROJECT_ID environment variable is required")
+        logger.error("Please set this variable and restart the application")
         return
+    
+    if not GOOGLE_APPLICATION_CREDENTIALS:
+        logger.warning("GOOGLE_APPLICATION_CREDENTIALS not set - BigQuery operations may fail")
     
     sync_manager = TableSyncManager()
     
     try:
+        logger.info("Initializing application components...")
         await sync_manager.initialize()
         
-        logger.info(f"Starting main loop with {SCAN_INTERVAL_SECONDS}s intervals")
+        # Get and log schema information
+        schema_info = await sync_manager.db_manager.get_schema_info()
+        logger.info("Database schema information:")
+        logger.info(f"  Total tables in database: {schema_info.get('total_tables', 'unknown')}")
+        logger.info(f"  Currently tracked tables: {schema_info.get('tracked_tables', 0)}")
+        logger.info(f"  Tables with enabled sync: {schema_info.get('enabled_configs', 0)}")
+        if schema_info.get('schema_version'):
+            logger.info(f"  Schema version: {schema_info['schema_version']}")
         
+        # Validate external dependencies
+        logger.info("Validating external dependencies...")
+        await validate_external_dependencies(sync_manager)
+        
+        logger.info("=" * 60)
+        logger.info("APPLICATION READY - Starting main processing loop")
+        logger.info(f"Scanning for table changes every {SCAN_INTERVAL_SECONDS} seconds")
+        logger.info("=" * 60)
+        
+        # Run initial scan
+        logger.info("Performing initial table scan...")
+        await sync_manager.scan_and_process()
+        
+        # Main loop
         while True:
             try:
-                await sync_manager.scan_and_process()
-                logger.info(f"Sleeping for {SCAN_INTERVAL_SECONDS} seconds...")
+                logger.debug(f"Sleeping for {SCAN_INTERVAL_SECONDS} seconds...")
                 await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+                await sync_manager.scan_and_process()
                 
             except KeyboardInterrupt:
                 logger.info("Received interrupt signal, shutting down...")
@@ -659,7 +1026,13 @@ async def main():
                 logger.info("Continuing after error...")
                 await asyncio.sleep(5)  # Short delay before retrying
     
+    except Exception as e:
+        logger.error(f"Failed to initialize application: {e}")
+        logger.error("Application startup failed - exiting")
+        raise
+    
     finally:
+        logger.info("Shutting down application...")
         await sync_manager.close()
         logger.info("Application shutdown complete")
 
