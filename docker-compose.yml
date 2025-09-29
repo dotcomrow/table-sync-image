@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # YugabyteDB
+  yugabytedb:
+    image: yugabytedb/yugabyte:2.20.1.1-b2
+    container_name: yugabytedb
+    ports:
+      - "5433:5433"  # YSQL port
+      - "9000:9000"  # Master UI
+      - "15433:15433" # YSQL metrics
+    command: |
+      bash -c "
+      rm -rf /tmp/demo &&
+      /home/yugabyte/bin/yugabyted start --daemon=false --ui=false \
+        --initial_scripts_dir=/home/yugabyte/share \
+        --listen=0.0.0.0 \
+        --base_dir=/tmp/demo \
+        --ysql_port=5433 \
+        --enable_ysql_conn_mgr=true
+      "
+    volumes:
+      - yugabyte_data:/tmp/demo
+    healthcheck:
+      test: ["CMD", "bash", "-c", "yugabyted status --base_dir=/tmp/demo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+      - zk_logs:/var/lib/zookeeper/log
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  # Kafka Connect with Debezium
+  kafka-connect:
+    image: debezium/connect:2.4
+    container_name: kafka-connect
+    depends_on:
+      - kafka
+      - yugabytedb
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    volumes:
+      - ./debezium-plugins:/kafka/connect/debezium-connector-postgres
+
+  # Table Sync Application
+  table-sync-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: table-sync-app
+    depends_on:
+      - yugabytedb
+      - kafka-connect
+    environment:
+      - DATABASE_URL=postgresql://yugabyte:yugabyte@yugabytedb:5433/yugabyte
+      - BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account.json
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - DEBEZIUM_CONNECTOR_URL=http://kafka-connect:8083
+      - SCAN_INTERVAL_SECONDS=30
+      - LOG_LEVEL=INFO
+      - DEBEZIUM_DATABASE_HOSTNAME=yugabytedb
+      - DEBEZIUM_DATABASE_PORT=5433
+      - DEBEZIUM_DATABASE_USER=yugabyte
+      - DEBEZIUM_DATABASE_PASSWORD=yugabyte
+      - DEBEZIUM_DATABASE_NAME=yugabyte
+      - TEMP_STORAGE_BUCKET=${TEMP_STORAGE_BUCKET}
+      - BATCH_SIZE=10000
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS_PATH}:/app/credentials/service-account.json:ro
+      - ./src:/app/src:ro
+    restart: unless-stopped
+
+volumes:
+  yugabyte_data:
+  zk_data:
+  zk_logs:
+  kafka_data:

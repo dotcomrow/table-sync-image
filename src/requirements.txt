@@ -1,0 +1,14 @@
+psycopg[binary]==3.1.12
+psycopg2-binary==2.9.7
+google-cloud-bigquery==3.11.4
+google-cloud-storage==2.10.0
+google-auth==2.23.3
+kafka-python==2.0.2
+pydantic==2.4.2
+python-dotenv==1.0.0
+sqlparse==0.4.4
+asyncio==3.4.3
+asyncpg==0.28.0
+loguru==0.7.2
+tenacity==8.2.3
+aiohttp==3.8.6
