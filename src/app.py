@@ -14,6 +14,8 @@ from google.auth import default
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 import sqlparse
+from aiohttp import web, web_response
+import aiohttp
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
@@ -62,6 +64,7 @@ class TableBootstrapConfig:
 
 @dataclass
 class TableState:
+    database_name: str
     schema_name: str
     table_name: str
     comment_hash: Optional[str]
@@ -72,6 +75,7 @@ class TableState:
     
     def to_dict(self) -> Dict:
         return {
+            'database_name': self.database_name,
             'schema_name': self.schema_name,
             'table_name': self.table_name,
             'comment_hash': self.comment_hash,
@@ -215,6 +219,7 @@ class DatabaseManager:
             # Create the main state table
             create_table_sql = """
             CREATE TABLE IF NOT EXISTS table_sync_state (
+                database_name VARCHAR(255) NOT NULL,
                 schema_name VARCHAR(255) NOT NULL,
                 table_name VARCHAR(255) NOT NULL,
                 comment_hash VARCHAR(64),
@@ -223,10 +228,42 @@ class DatabaseManager:
                 pipeline_configured BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                PRIMARY KEY (schema_name, table_name)
+                PRIMARY KEY (database_name, schema_name, table_name)
             );
             """
             await conn.execute(create_table_sql)
+            
+            # Check if we need to migrate existing table to add database_name column
+            try:
+                await conn.execute("""
+                    ALTER TABLE table_sync_state 
+                    ADD COLUMN IF NOT EXISTS database_name VARCHAR(255);
+                """)
+                
+                # If the column was just added, update existing rows with current database name
+                current_db = await conn.fetchval("SELECT current_database()")
+                await conn.execute("""
+                    UPDATE table_sync_state 
+                    SET database_name = $1 
+                    WHERE database_name IS NULL;
+                """, current_db)
+                
+                # Update primary key if needed (this might fail if already correct)
+                try:
+                    await conn.execute("""
+                        ALTER TABLE table_sync_state 
+                        DROP CONSTRAINT IF EXISTS table_sync_state_pkey;
+                    """)
+                    await conn.execute("""
+                        ALTER TABLE table_sync_state 
+                        ADD PRIMARY KEY (database_name, schema_name, table_name);
+                    """)
+                except Exception:
+                    # Primary key update failed, that's okay if it already exists
+                    pass
+                    
+            except Exception as e:
+                logger.warning(f"Table migration warning (this is usually okay): {e}")
             
             # Create indexes for performance
             indexes_sql = [
@@ -304,20 +341,21 @@ class DatabaseManager:
             test_table = 'test_table_validation'
             
             # Test insert
+            current_db = await conn.fetchval("SELECT current_database()")
             await conn.execute("""
-                INSERT INTO table_sync_state (schema_name, table_name, comment_hash) 
-                VALUES ($1, $2, 'test_hash')
-                ON CONFLICT (schema_name, table_name) DO UPDATE SET 
+                INSERT INTO table_sync_state (database_name, schema_name, table_name, comment_hash) 
+                VALUES ($1, $2, $3, 'test_hash')
+                ON CONFLICT (database_name, schema_name, table_name) DO UPDATE SET 
                 comment_hash = 'test_hash'
-            """, test_schema, test_table)
+            """, current_db, test_schema, test_table)
             
             # Test select
             exists = await conn.fetchval("""
                 SELECT EXISTS (
                     SELECT 1 FROM table_sync_state 
-                    WHERE schema_name = $1 AND table_name = $2
+                    WHERE database_name = $1 AND schema_name = $2 AND table_name = $3
                 )
-            """, test_schema, test_table)
+            """, current_db, test_schema, test_table)
             
             if not exists:
                 raise Exception("Failed to insert test record into state table")
@@ -325,8 +363,8 @@ class DatabaseManager:
             # Test delete (cleanup)
             await conn.execute("""
                 DELETE FROM table_sync_state 
-                WHERE schema_name = $1 AND table_name = $2
-            """, test_schema, test_table)
+                WHERE database_name = $1 AND schema_name = $2 AND table_name = $3
+            """, current_db, test_schema, test_table)
             
             # Check metadata table
             metadata_exists = await conn.fetchval("""
@@ -390,29 +428,73 @@ class DatabaseManager:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
     
-    async def get_all_tables_with_comments(self) -> List[Dict]:
-        """Get all tables and their comments from information_schema"""
+    async def get_all_databases(self) -> List[str]:
+        """Get all databases in the YugabyteDB cluster"""
         query = """
-        SELECT 
-            t.table_schema,
-            t.table_name,
-            obj_description(c.oid) as comment
-        FROM information_schema.tables t
-        JOIN pg_class c ON c.relname = t.table_name
-        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.table_schema
-        WHERE t.table_type = 'BASE TABLE'
-        AND t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-        ORDER BY t.table_schema, t.table_name;
+        SELECT datname 
+        FROM pg_database 
+        WHERE datistemplate = false 
+        AND datname NOT IN ('template0', 'template1', 'postgres', 'system_platform')
+        ORDER BY datname;
         """
         
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query)
-            return [dict(row) for row in rows]
+            return [row['datname'] for row in rows]
+
+    async def get_all_tables_with_comments(self) -> List[Dict]:
+        """Get all tables and their comments from ALL databases and schemas"""
+        all_tables = []
+        
+        # Get all databases
+        databases = await self.get_all_databases()
+        logger.info(f"Scanning {len(databases)} databases for tables...")
+        
+        for database in databases:
+            try:
+                # Create connection string for this specific database
+                db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database}'
+                
+                # Connect to this specific database
+                conn = await asyncpg.connect(db_url)
+                
+                try:
+                    # Get all tables from this database
+                    query = """
+                    SELECT 
+                        current_database() as database_name,
+                        t.table_schema,
+                        t.table_name,
+                        obj_description(c.oid) as comment
+                    FROM information_schema.tables t
+                    JOIN pg_class c ON c.relname = t.table_name
+                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.table_schema
+                    WHERE t.table_type = 'BASE TABLE'
+                    AND t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast', 'yb_catalog')
+                    ORDER BY t.table_schema, t.table_name;
+                    """
+                    
+                    rows = await conn.fetch(query)
+                    database_tables = [dict(row) for row in rows]
+                    all_tables.extend(database_tables)
+                    
+                    if database_tables:
+                        logger.info(f"Found {len(database_tables)} tables in database '{database}'")
+                    
+                finally:
+                    await conn.close()
+                    
+            except Exception as e:
+                logger.warning(f"Failed to scan database '{database}': {e}")
+                continue
+        
+        logger.info(f"Total tables discovered across all databases: {len(all_tables)}")
+        return all_tables
     
     async def get_current_state(self) -> Dict[str, TableState]:
         """Get current state of all tracked tables"""
         query = """
-        SELECT schema_name, table_name, comment_hash, bootstrap_config,
+        SELECT database_name, schema_name, table_name, comment_hash, bootstrap_config,
                bigquery_created, pipeline_configured, last_updated
         FROM table_sync_state;
         """
@@ -422,13 +504,14 @@ class DatabaseManager:
             
         states = {}
         for row in rows:
-            key = f"{row['schema_name']}.{row['table_name']}"
+            key = f"{row['database_name']}.{row['schema_name']}.{row['table_name']}"
             bootstrap_config = None
             if row['bootstrap_config']:
                 config_dict = row['bootstrap_config']
                 bootstrap_config = TableBootstrapConfig(**config_dict)
             
             states[key] = TableState(
+                database_name=row['database_name'],
                 schema_name=row['schema_name'],
                 table_name=row['table_name'],
                 comment_hash=row['comment_hash'],
@@ -444,9 +527,9 @@ class DatabaseManager:
         """Insert or update table state"""
         query = """
         INSERT INTO table_sync_state 
-        (schema_name, table_name, comment_hash, bootstrap_config, bigquery_created, pipeline_configured, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (schema_name, table_name) 
+        (database_name, schema_name, table_name, comment_hash, bootstrap_config, bigquery_created, pipeline_configured, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (database_name, schema_name, table_name) 
         DO UPDATE SET
             comment_hash = EXCLUDED.comment_hash,
             bootstrap_config = EXCLUDED.bootstrap_config,
@@ -458,6 +541,7 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 query,
+                state.database_name,
                 state.schema_name,
                 state.table_name,
                 state.comment_hash,
@@ -467,12 +551,12 @@ class DatabaseManager:
                 state.last_updated
             )
     
-    async def delete_table_state(self, schema_name: str, table_name: str):
+    async def delete_table_state(self, database_name: str, schema_name: str, table_name: str):
         """Delete table state record"""
-        query = "DELETE FROM table_sync_state WHERE schema_name = $1 AND table_name = $2;"
+        query = "DELETE FROM table_sync_state WHERE database_name = $1 AND schema_name = $2 AND table_name = $3;"
         
         async with self.pool.acquire() as conn:
-            await conn.execute(query, schema_name, table_name)
+            await conn.execute(query, database_name, schema_name, table_name)
     
     async def get_table_columns(self, schema_name: str, table_name: str) -> List[Dict]:
         """Get column information for a table"""
@@ -696,6 +780,7 @@ class TableSyncManager:
     
     async def close(self):
         """Close the sync manager"""
+        await self.shutdown_health_server()
         await self.db_manager.close()
     
     def _calculate_comment_hash(self, comment: str) -> str:
@@ -759,11 +844,12 @@ class TableSyncManager:
         seen_tables = set()
         
         for table_info in current_tables:
+            database_name = table_info['database_name']
             schema_name = table_info['table_schema']
             table_name = table_info['table_name']
             comment = table_info['comment']
             
-            table_key = f"{schema_name}.{table_name}"
+            table_key = f"{database_name}.{schema_name}.{table_name}"
             seen_tables.add(table_key)
             
             # Parse bootstrap configuration from comment
@@ -778,12 +864,12 @@ class TableSyncManager:
             
             # Determine what action to take
             if current_state is None:
-                # New table with comment
+                # New table - create state entry for ALL tables (with or without comments)
                 if bootstrap_config and bootstrap_config.enabled:
-                    await self._handle_new_table_with_config(schema_name, table_name, comment_hash, bootstrap_config)
-                elif comment_hash:
-                    # Track table even if bootstrap is disabled
-                    await self._create_table_state(schema_name, table_name, comment_hash, bootstrap_config)
+                    await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
+                else:
+                    # Track table even if bootstrap is disabled or no comment exists
+                    await self._create_table_state(database_name, schema_name, table_name, comment_hash, bootstrap_config)
             else:
                 # Existing table - check for changes
                 if comment_hash != current_state.comment_hash:
@@ -794,9 +880,9 @@ class TableSyncManager:
             if table_key not in seen_tables:
                 await self._handle_table_removal(state)
     
-    async def _handle_new_table_with_config(self, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig):
+    async def _handle_new_table_with_config(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig):
         """Handle a new table with bootstrap configuration"""
-        logger.info(f"Processing new table {schema_name}.{table_name} with bootstrap config")
+        logger.info(f"Processing new table {database_name}.{schema_name}.{table_name} with bootstrap config")
         
         if not self.bq_manager:
             logger.error("BigQuery manager not initialized - check BIGQUERY_PROJECT_ID")
@@ -824,6 +910,7 @@ class TableSyncManager:
             
             # Save state
             state = TableState(
+                database_name=database_name,
                 schema_name=schema_name,
                 table_name=table_name,
                 comment_hash=comment_hash,
@@ -841,6 +928,7 @@ class TableSyncManager:
             
             # Save state
             state = TableState(
+                database_name=database_name,
                 schema_name=schema_name,
                 table_name=table_name,
                 comment_hash=comment_hash,
@@ -851,11 +939,12 @@ class TableSyncManager:
             )
         
         await self.db_manager.upsert_table_state(state)
-        logger.info(f"Successfully processed new table {schema_name}.{table_name}")
+        logger.info(f"Successfully processed new table {database_name}.{schema_name}.{table_name}")
     
-    async def _create_table_state(self, schema_name: str, table_name: str, comment_hash: str, config: Optional[TableBootstrapConfig]):
+    async def _create_table_state(self, database_name: str, schema_name: str, table_name: str, comment_hash: Optional[str], config: Optional[TableBootstrapConfig]):
         """Create state record for a table"""
         state = TableState(
+            database_name=database_name,
             schema_name=schema_name,
             table_name=table_name,
             comment_hash=comment_hash,
@@ -890,7 +979,7 @@ class TableSyncManager:
     
     async def _handle_table_removal(self, state: TableState):
         """Handle removal of table or its bootstrap configuration"""
-        logger.info(f"Handling removal of table {state.schema_name}.{state.table_name}")
+        logger.info(f"Handling removal of table {state.database_name}.{state.schema_name}.{state.table_name}")
         
         if state.bigquery_created and state.bootstrap_config:
             # Delete BigQuery table
@@ -903,8 +992,8 @@ class TableSyncManager:
             await self.pipeline_manager.remove_debezium_connector(state.schema_name, state.table_name)
         
         # Remove state record
-        await self.db_manager.delete_table_state(state.schema_name, state.table_name)
-        logger.info(f"Successfully removed table {state.schema_name}.{state.table_name}")
+        await self.db_manager.delete_table_state(state.database_name, state.schema_name, state.table_name)
+        logger.info(f"Successfully removed table {state.database_name}.{state.schema_name}.{state.table_name}")
     
     async def scan_and_process(self):
         """Main scanning and processing loop"""
@@ -925,6 +1014,81 @@ class TableSyncManager:
         except Exception as e:
             logger.error(f"Error during scan and processing: {e}")
             raise
+
+    async def start_health_server(self):
+        """Start HTTP health check server for Kubernetes probes"""
+        app = web.Application()
+        app.router.add_get('/health', self.health_check)
+        app.router.add_get('/ready', self.readiness_check)
+        
+        self.health_server_runner = web.AppRunner(app)
+        await self.health_server_runner.setup()
+        
+        site = web.TCPSite(self.health_server_runner, '0.0.0.0', 8080)
+        await site.start()
+        logger.info("Health check server started on port 8080")
+        
+    async def health_check(self, request):
+        """Liveness probe endpoint - basic application health"""
+        try:
+            # Simple health check - just verify the application is running
+            health_status = {
+                "status": "healthy",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "application": "table-sync",
+                "version": "1.0.0"
+            }
+            return web.json_response(health_status, status=200)
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            error_response = {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            return web.json_response(error_response, status=503)
+    
+    async def readiness_check(self, request):
+        """Readiness probe endpoint - verify dependencies are ready"""
+        try:
+            # Check database connectivity
+            if not self.db_manager or not self.db_manager.pool:
+                raise Exception("Database manager not initialized")
+                
+            async with self.db_manager.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            
+            # Check BigQuery if configured
+            if self.bq_manager:
+                try:
+                    # Simple BigQuery connectivity test
+                    list(self.bq_manager.client.list_datasets(max_results=1))
+                except Exception as bq_error:
+                    logger.warning(f"BigQuery readiness check failed: {bq_error}")
+                    # Don't fail readiness for BigQuery issues - it's not critical for startup
+            
+            ready_status = {
+                "status": "ready",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "database": "connected",
+                "bigquery": "configured" if self.bq_manager else "not_configured"
+            }
+            return web.json_response(ready_status, status=200)
+            
+        except Exception as e:
+            logger.error(f"Readiness check failed: {e}")
+            not_ready_response = {
+                "status": "not_ready",
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            return web.json_response(not_ready_response, status=503)
+
+    async def shutdown_health_server(self):
+        """Shutdown the health check server"""
+        if hasattr(self, 'health_server_runner') and self.health_server_runner:
+            await self.health_server_runner.cleanup()
+            logger.info("Health check server shut down")
 
 async def validate_external_dependencies(sync_manager: 'TableSyncManager'):
     """Validate external dependencies are accessible"""
@@ -1006,6 +1170,10 @@ async def main():
         # Validate external dependencies
         logger.info("Validating external dependencies...")
         await validate_external_dependencies(sync_manager)
+        
+        # Start health check server for Kubernetes probes
+        logger.info("Starting health check server...")
+        await sync_manager.start_health_server()
         
         logger.info("=" * 60)
         logger.info("APPLICATION READY - Starting main processing loop")
