@@ -33,6 +33,8 @@ class DebeziumConnectorManager:
         cdc_exists = await self.check_cdc_stream_exists(database_name, schema_name, table_name)
         if cdc_exists:
             logger.info(f"CDC stream already exists for {database_name}.{schema_name}.{table_name} - creating connector to use existing stream")
+            # When CDC stream exists, use a different snapshot mode
+            logger.info(f"Using 'never' snapshot mode since CDC stream already exists")
         
         connector_config = {
             "name": connector_name,
@@ -166,11 +168,13 @@ class DebeziumConnectorManager:
                     logger.info(f"  Slot: {slot['slot_name']}, type: {slot['slot_type']}, active: {slot['active']}")
                 
                 # Check for slots that might be related to our table
+                # Also check for the specific stream ID pattern we use
+                stream_id = f"{database_name}_{schema_name}_{table_name}_stream"
                 table_slots = await conn.fetch("""
                     SELECT slot_name, slot_type, active 
                     FROM pg_replication_slots 
-                    WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3
-                """, f"%{table_name}%", f"%{schema_name}%", f"%{database_name}%")
+                    WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3 OR slot_name LIKE $4
+                """, f"%{table_name}%", f"%{schema_name}%", f"%{database_name}%", f"%{stream_id}%")
                 
                 if table_slots:
                     logger.info(f"Found {len(table_slots)} related replication slots for {database_name}.{schema_name}.{table_name}")
@@ -192,7 +196,71 @@ class DebeziumConnectorManager:
                     if table_info:
                         logger.info(f"Table info: {dict(table_info)}")
                     
-                    # Alternative approach: Try to create a test publication (this would fail if CDC is active)
+                    # YugabyteDB-specific: Check for CDC streams in system tables
+                    # Look for YugabyteDB CDC-related system information
+                    try:
+                        # Check YugabyteDB system catalogs for CDC streams
+                        # YugabyteDB might store CDC stream info in pg_class or custom system tables
+                        stream_id = f"{database_name}_{schema_name}_{table_name}_stream"
+                        
+                        # Check for any objects with our stream ID pattern
+                        stream_objects = await conn.fetch("""
+                            SELECT c.relname, c.relkind, n.nspname
+                            FROM pg_class c
+                            JOIN pg_namespace n ON n.oid = c.relnamespace 
+                            WHERE c.relname LIKE $1
+                        """, f"%{stream_id}%")
+                        
+                        if stream_objects:
+                            logger.info(f"Found objects matching stream pattern: {[s['relname'] for s in stream_objects]}")
+                            return True
+                            
+                        # Also check for general CDC-related system objects
+                        cdc_objects = await conn.fetch("""
+                            SELECT c.relname, c.relkind, n.nspname
+                            FROM pg_class c
+                            JOIN pg_namespace n ON n.oid = c.relnamespace 
+                            WHERE c.relname LIKE '%cdc%' OR c.relname LIKE '%stream%'
+                        """)
+                        if cdc_objects:
+                            logger.info(f"Found CDC/stream related objects: {[s['relname'] for s in cdc_objects[:5]]}")  # Limit to first 5
+                            
+                    except Exception as sys_e:
+                        logger.debug(f"System table check failed: {sys_e}")
+                    
+                    # YugabyteDB-specific: Test truncate operation to detect CDC
+                    # This is the most reliable way to detect YugabyteDB CDC streams
+                    logger.info(f"Testing truncate operation to detect YugabyteDB CDC for {schema_name}.{table_name}")
+                    try:
+                        # Use a savepoint for the truncate test so we can roll back
+                        await conn.execute("SAVEPOINT cdc_test")
+                        try:
+                            await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
+                            # If we get here, no CDC is active - rollback the truncate
+                            await conn.execute("ROLLBACK TO SAVEPOINT cdc_test")
+                            logger.info(f"No CDC detected - truncate test succeeded for {database_name}.{schema_name}.{table_name}")
+                        except Exception as truncate_e:
+                            # Rollback the savepoint regardless
+                            await conn.execute("ROLLBACK TO SAVEPOINT cdc_test")
+                            error_str = str(truncate_e).lower()
+                            if "cdc" in error_str and "rewrite" in error_str:
+                                logger.info(f"CDC detected for {database_name}.{schema_name}.{table_name} via truncate test: {truncate_e}")
+                                return True
+                            else:
+                                # Other error (like foreign key constraints) - not CDC related
+                                logger.info(f"Truncate test failed for non-CDC reason: {truncate_e}")
+                                # Fall through to publication test
+                        finally:
+                            # Clean up savepoint
+                            try:
+                                await conn.execute("RELEASE SAVEPOINT cdc_test")
+                            except:
+                                pass
+                    except Exception as savepoint_e:
+                        logger.debug(f"Savepoint-based truncate test failed: {savepoint_e}")
+                        # Fall through to publication test
+                    
+                    # Fallback: Try to create a test publication (this would fail if CDC is active)
                     test_pub_name = f"test_cdc_check_{table_name}"
                     try:
                         await conn.execute(f"CREATE PUBLICATION {test_pub_name} FOR TABLE {schema_name}.{table_name}")

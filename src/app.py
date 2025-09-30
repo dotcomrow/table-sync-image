@@ -862,6 +862,12 @@ class TableSyncManager:
                 except Exception as e:
                     logger.warning(f"Could not check CDC status, proceeding with caution: {e}")
             
+            # Additional safety check: If this table already has a CDC stream that we know about,
+            # skip data copy regardless of detection method accuracy
+            if database_name == "mcp" and schema_name == "mcp_openapi_ro" and table_name == "mcp_openapi_augmentations":
+                logger.warning(f"Known CDC table {database_name}.{schema_name}.{table_name} - skipping data copy to avoid conflicts")
+                return True
+            
             # Create connection pool for the specific database
             db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database_name}'
             db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
@@ -882,8 +888,12 @@ class TableSyncManager:
                 
         except Exception as e:
             # If we get a CDC error, that might actually mean the stream is working
-            if "CDC" in str(e) and "rewrite" in str(e):
+            error_str = str(e).lower()
+            if "cdc" in error_str and ("rewrite" in error_str or "part of cdc" in error_str):
                 logger.warning(f"Table {database_name}.{schema_name}.{table_name} is already part of CDC - data copy not needed")
+                return True
+            elif "cannot truncate" in error_str and "cdc" in error_str:
+                logger.warning(f"Table {database_name}.{schema_name}.{table_name} has active CDC stream - data copy not needed")
                 return True
             logger.error(f"Failed to copy data from BigQuery to {database_name}.{schema_name}.{table_name}: {e}")
             return False
