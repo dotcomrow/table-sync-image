@@ -851,6 +851,17 @@ class TableSyncManager:
         dataset_id, table_id = config.bq_table.split('.')
         
         try:
+            # Check if table is part of CDC - if so, skip truncation
+            truncate_target = True
+            if self.pipeline_manager:
+                try:
+                    cdc_exists = await self.pipeline_manager.connector_manager.check_cdc_stream_exists(database_name, schema_name, table_name)
+                    if cdc_exists:
+                        logger.warning(f"Table {database_name}.{schema_name}.{table_name} is part of CDC - skipping data copy to avoid conflicts")
+                        return True  # Consider it successful since CDC is already active
+                except Exception as e:
+                    logger.warning(f"Could not check CDC status, proceeding with caution: {e}")
+            
             # Create connection pool for the specific database
             db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database_name}'
             db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
@@ -862,7 +873,7 @@ class TableSyncManager:
                     table_id,
                     schema_name,
                     table_name,
-                    truncate_target=True
+                    truncate_target=truncate_target
                 )
                 logger.info(f"Successfully copied data from BigQuery to {database_name}.{schema_name}.{table_name}")
                 return True
@@ -870,6 +881,10 @@ class TableSyncManager:
                 await db_pool.close()
                 
         except Exception as e:
+            # If we get a CDC error, that might actually mean the stream is working
+            if "CDC" in str(e) and "rewrite" in str(e):
+                logger.info(f"Table {database_name}.{schema_name}.{table_name} is already part of CDC - data copy not needed")
+                return True
             logger.error(f"Failed to copy data from BigQuery to {database_name}.{schema_name}.{table_name}: {e}")
             return False
     

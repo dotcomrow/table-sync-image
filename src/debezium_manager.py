@@ -29,6 +29,11 @@ class DebeziumConnectorManager:
             logger.info(f"Connector {connector_name} already exists")
             return True
         
+        # Check if CDC stream already exists in YugabyteDB
+        cdc_exists = await self.check_cdc_stream_exists(database_name, schema_name, table_name)
+        if cdc_exists:
+            logger.info(f"CDC stream already exists for {database_name}.{schema_name}.{table_name} - creating connector to use existing stream")
+        
         connector_config = {
             "name": connector_name,
             "config": {
@@ -44,21 +49,16 @@ class DebeziumConnectorManager:
                 "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
                 
-                # YugabyteDB specific settings
-                "database.streamid": f"stream_{database_name}_{schema_name}_{table_name}",
+                # YugabyteDB specific settings - try different stream ID format
+                "database.streamid": f"{database_name}_{schema_name}_{table_name}_stream",
                 "snapshot.mode": "never",  # We handle initial data separately
                 
+                # Try without transforms first to see if connector works
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "value.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "key.converter.schemas.enable": "false",
                 "value.converter.schemas.enable": "false",
-                
-                # Topic routing
-                "transforms": "route",
-                "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
-                "transforms.route.regex": f"yugabyte-{database_name}-{schema_name}\.{schema_name}\.{table_name}",
-                "transforms.route.replacement": f"bigquery-{bq_table.replace('.', '-')}",
                 
                 # Error handling
                 "errors.tolerance": "all",
@@ -67,6 +67,11 @@ class DebeziumConnectorManager:
             }
         }
         
+        logger.info(f"Creating connector {connector_name} with config:")
+        for key, value in connector_config["config"].items():
+            if "password" not in key.lower():
+                logger.info(f"  {key}: {value}")
+        
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -74,16 +79,29 @@ class DebeziumConnectorManager:
                     json=connector_config,
                     headers={"Content-Type": "application/json"}
                 ) as response:
+                    response_text = await response.text()
+                    
                     if response.status == 201:
                         logger.info(f"Successfully created Debezium connector: {connector_name}")
                         return True
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Failed to create connector {connector_name}: {response.status} - {error_text}")
+                        logger.error(f"Failed to create connector {connector_name}: {response.status}")
+                        logger.error(f"Response body: {response_text}")
+                        
+                        # Try to parse error details
+                        try:
+                            import json
+                            error_data = json.loads(response_text)
+                            if "message" in error_data:
+                                logger.error(f"Error details: {error_data['message']}")
+                        except:
+                            pass
+                        
                         return False
                         
         except Exception as e:
             logger.error(f"Error creating Debezium connector {connector_name}: {e}")
+            logger.error(f"Connector config was: {connector_config}")
             return False
     
     async def delete_connector(self, database_name: str, schema_name: str, table_name: str) -> bool:
@@ -125,6 +143,51 @@ class DebeziumConnectorManager:
         """Check if a connector exists for a specific database/schema/table"""
         connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
         return await self.connector_exists(connector_name)
+    
+    async def check_cdc_stream_exists(self, database_name: str, schema_name: str, table_name: str) -> bool:
+        """Check if a CDC stream already exists for the table in YugabyteDB"""
+        import asyncpg
+        database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+        db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
+        
+        try:
+            conn = await asyncpg.connect(db_url)
+            try:
+                # Check if table is part of any CDC stream
+                # YugabyteDB stores CDC stream information in system tables
+                stream_check = await conn.fetchval("""
+                    SELECT COUNT(*) > 0 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace 
+                    WHERE c.relname = $1 AND n.nspname = $2
+                    AND EXISTS (
+                        SELECT 1 FROM pg_replication_slots 
+                        WHERE slot_name LIKE '%' || $1 || '%'
+                    )
+                """, table_name, schema_name)
+                
+                if stream_check:
+                    logger.info(f"CDC stream detected for {database_name}.{schema_name}.{table_name}")
+                    return True
+                
+                # Alternative check - look for any replication slots that might be related
+                slots = await conn.fetch("""
+                    SELECT slot_name, slot_type, active 
+                    FROM pg_replication_slots 
+                    WHERE slot_name LIKE $1
+                """, f"%{table_name}%")
+                
+                if slots:
+                    logger.info(f"Found {len(slots)} replication slots for table {table_name}: {[s['slot_name'] for s in slots]}")
+                    return True
+                
+                return False
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.warning(f"Could not check CDC stream status for {database_name}.{schema_name}.{table_name}: {e}")
+            return False
     
     async def get_connector_status(self, connector_name: str) -> Optional[Dict]:
         """Get connector status"""
