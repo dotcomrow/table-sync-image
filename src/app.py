@@ -1413,12 +1413,15 @@ class TableSyncManager:
                 except Exception as e:
                     logger.warning(f"   ⚠️  Data sync failed: {e}")
             
-            # Step 3: Get or create CDC stream ID for table-specific streaming
-            cdc_stream_id = await self.db_manager.get_or_create_cdc_stream_id(database_name, schema_name, table_name)
-            if cdc_stream_id:
-                logger.info(f"   📊 CDC Stream ID for {database_name}.{schema_name}.{table_name}: {cdc_stream_id}")
-            else:
-                logger.warning(f"   ⚠️  Could not obtain CDC stream ID for {database_name}.{schema_name}.{table_name}")
+            # Step 3: TEMPORARY - Skip CDC stream ID management to avoid cross-database conflicts
+            # TODO: Re-enable with proper database isolation
+            # cdc_stream_id = await self.db_manager.get_or_create_cdc_stream_id(database_name, schema_name, table_name)
+            # if cdc_stream_id:
+            #     logger.info(f"   📊 CDC Stream ID for {database_name}.{schema_name}.{table_name}: {cdc_stream_id}")
+            # else:
+            #     logger.warning(f"   ⚠️  Could not obtain CDC stream ID for {database_name}.{schema_name}.{table_name}")
+            cdc_stream_id = None
+            logger.info(f"   📊 CDC stream auto-creation enabled for {database_name}.{schema_name}.{table_name}")
             
             # Step 4: Handle pipeline
             pipeline_success = actual_pipeline_exists

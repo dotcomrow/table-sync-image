@@ -461,16 +461,20 @@ class DebeziumConnectorManager:
             "errors.log.include.messages": "true"
         }
         
-        # Add stream ID configuration if provided for database-level stream reuse
-        if cdc_stream_id:
-            logger.info(f"📊 Using provided CDC stream ID: {cdc_stream_id}")
-            config_dict.update({
-                "database.stream.id": cdc_stream_id,
-                "database.streamid": cdc_stream_id,
-                "yugabyte.stream.id": cdc_stream_id,
-            })
-        else:
-            logger.info("📊 No CDC stream ID provided - connector will auto-create stream")
+        # TEMPORARY FIX: Disable CDC stream ID reuse to avoid cross-database conflicts
+        # Let each connector auto-create its own CDC stream for now
+        logger.info("📊 CDC stream auto-creation enabled - each connector will create its own stream")
+        
+        # TODO: Re-enable CDC stream reuse with proper database isolation
+        # if cdc_stream_id:
+        #     logger.info(f"📊 Using provided CDC stream ID: {cdc_stream_id}")
+        #     config_dict.update({
+        #         "database.stream.id": cdc_stream_id,
+        #         "database.streamid": cdc_stream_id,
+        #         "yugabyte.stream.id": cdc_stream_id,
+        #     })
+        # else:
+        #     logger.info("📊 No CDC stream ID provided - connector will auto-create stream")
         
         connector_config = {
             "name": connector_name,
