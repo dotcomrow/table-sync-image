@@ -507,13 +507,21 @@ class DebeziumConnectorManager:
                         if response.status == 201:
                             logger.info(f"✅ HTTP request succeeded - created Debezium connector: {connector_name} (attempt {attempt + 1})")
                             
-                            # Wait a moment for connector to initialize
-                            logger.info(f"⏳ Waiting 3 seconds for connector initialization...")
-                            await asyncio.sleep(3)
+                            # Wait for connector to initialize and detect reconfiguration errors
+                            logger.info(f"⏳ Waiting 5 seconds for connector initialization...")
+                            await asyncio.sleep(5)
                             
-                            # Check connector status to ensure it's actually working
+                            # Check connector status multiple times to catch reconfiguration errors
                             logger.info(f"🔍 Fetching connector status for {connector_name}...")
                             status = await self.get_connector_status(connector_name)
+                            
+                            # If connector exists but has issues, wait a bit more for reconfiguration to complete
+                            if status:
+                                connector_state = status.get('connector', {}).get('state', 'UNKNOWN')
+                                if connector_state not in ['RUNNING', 'PAUSED']:
+                                    logger.info(f"🔍 Connector state is {connector_state}, waiting additional 10 seconds for reconfiguration...")
+                                    await asyncio.sleep(10)
+                                    status = await self.get_connector_status(connector_name)
                             if status:
                                 logger.info(f"📊 Connector status retrieved successfully")
                                 connector_state = status.get('connector', {}).get('state', 'UNKNOWN')
@@ -529,10 +537,19 @@ class DebeziumConnectorManager:
                                         task_trace = task.get('trace', '')
                                         logger.error(f"❌ Task {i} failed with trace: {task_trace}")
                                         
-                                        # Check for yb-admin stream conflict in task failure
-                                        if "yb-admin stream" in task_trace.lower() or "replication slot" in task_trace.lower():
-                                            logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in task failure!")
-                                            logger.error(f"This indicates existing CDC streams created via yb-admin tool")
+                                        # Check for various YugabyteDB stream conflicts in task failure
+                                        if ("yb-admin stream" in task_trace.lower() or 
+                                            "replication slot" in task_trace.lower() or
+                                            ("nullpointerexception" in task_trace.lower() and "beforeimage" in task_trace.lower()) or
+                                            ("nullpointerexception" in task_trace.lower() and "isbeforeimageenabled" in task_trace.lower())):
+                                            
+                                            if "nullpointerexception" in task_trace.lower() and ("beforeimage" in task_trace.lower() or "isbeforeimageenabled" in task_trace.lower()):
+                                                logger.error(f"🚨 YugabyteDB before-image metadata corruption detected in task failure!")
+                                                logger.error(f"This indicates CDC stream metadata is corrupted or inconsistent")
+                                                logger.error(f"NullPointerException in isBeforeImageEnabled suggests stream metadata issues")
+                                            else:
+                                                logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in task failure!")
+                                                logger.error(f"This indicates existing CDC streams created via yb-admin tool")
                                             
                                             # Delete the failed connector
                                             await self.delete_connector(database_name, schema_name, table_name)
@@ -567,10 +584,17 @@ class DebeziumConnectorManager:
                             logger.error(f"❌ HTTP 500 - Internal Server Error during connector creation (attempt {attempt + 1})")
                             logger.error(f"Response body: {response_text}")
                             
-                            # Parse the 500 error for yb-admin stream conflicts
-                            if "yb-admin stream" in response_text.lower():
-                                logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in HTTP 500 response!")
-                                logger.error(f"Error: Cannot create a replication slot on the same namespace which already has a yb-admin stream on it")
+                            # Parse the 500 error for various YugabyteDB stream conflicts
+                            if ("yb-admin stream" in response_text.lower() or
+                                ("nullpointerexception" in response_text.lower() and ("beforeimage" in response_text.lower() or "isbeforeimageenabled" in response_text.lower()))):
+                                
+                                if "nullpointerexception" in response_text.lower() and ("beforeimage" in response_text.lower() or "isbeforeimageenabled" in response_text.lower()):
+                                    logger.error(f"🚨 YugabyteDB before-image metadata corruption detected in HTTP 500 response!")
+                                    logger.error(f"NullPointerException in isBeforeImageEnabled indicates CDC stream metadata is corrupted")
+                                    logger.error(f"This typically happens when CDC streams are in an inconsistent state")
+                                else:
+                                    logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in HTTP 500 response!")
+                                    logger.error(f"Error: Cannot create a replication slot on the same namespace which already has a yb-admin stream on it")
                                 
                                 if attempt < max_retries - 1:
                                     logger.warning(f"Attempting automated yb-admin stream cleanup...")
