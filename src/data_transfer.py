@@ -156,8 +156,17 @@ class DataTransferManager:
         
         async with db_pool.acquire() as conn:
             if truncate_target:
-                await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
-                logger.info(f"Truncated table {schema_name}.{table_name}")
+                try:
+                    await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
+                    logger.info(f"Truncated table {schema_name}.{table_name}")
+                except Exception as e:
+                    # If regular truncate fails due to foreign keys, try CASCADE
+                    if "foreign key constraint" in str(e).lower():
+                        logger.warning(f"Regular truncate failed due to foreign keys, using CASCADE: {e}")
+                        await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name} CASCADE")
+                        logger.info(f"Truncated table {schema_name}.{table_name} with CASCADE")
+                    else:
+                        raise
             
             # Use PostgreSQL COPY command for efficient import
             with open(filename, 'r', encoding='utf-8') as csvfile:

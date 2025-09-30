@@ -712,13 +712,8 @@ class PipelineManager:
         logger.info(f"Setting up Debezium connector for {database_name}.{schema_name}.{table_name}")
         
         try:
-            # Create publication for the table (need to connect to the correct database)
-            pub_success = await self.publication_manager.create_publication_for_table(database_name, schema_name, table_name)
-            if not pub_success:
-                logger.error(f"Failed to create publication for {database_name}.{schema_name}.{table_name}")
-                return False
-            
-            # Create Debezium connector
+            # YugabyteDB gRPC connector doesn't need publications - it uses native streaming
+            # Create Debezium connector directly
             conn_success = await self.connector_manager.create_connector(
                 database_name, schema_name, table_name, config.bq_table
             )
@@ -741,14 +736,11 @@ class PipelineManager:
             # Delete Debezium connector
             conn_success = await self.connector_manager.delete_connector(database_name, schema_name, table_name)
             
-            # Drop publication
-            pub_success = await self.publication_manager.drop_publication_for_table(database_name, schema_name, table_name)
-            
-            if conn_success and pub_success:
+            if conn_success:
                 logger.info(f"Successfully removed pipeline for {database_name}.{schema_name}.{table_name}")
                 return True
             else:
-                logger.warning(f"Partial failure removing pipeline for {database_name}.{schema_name}.{table_name}")
+                logger.warning(f"Failed to remove pipeline for {database_name}.{schema_name}.{table_name}")
                 return False
                 
         except Exception as e:

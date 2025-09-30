@@ -32,8 +32,10 @@ class DebeziumConnectorManager:
         connector_config = {
             "name": connector_name,
             "config": {
-                "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
                 "tasks.max": "1",
+                
+                # YugabyteDB gRPC connector specific config
                 "database.hostname": self.db_hostname,
                 "database.port": self.db_port,
                 "database.user": self.db_user,
@@ -41,9 +43,10 @@ class DebeziumConnectorManager:
                 "database.dbname": database_name,
                 "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
-                "plugin.name": "pgoutput",
-                "slot.name": f"debezium_{database_name}_{schema_name}_{table_name}",
-                "publication.name": f"dbz_publication_{database_name}_{schema_name}_{table_name}",
+                
+                # YugabyteDB specific settings
+                "database.streamid": f"stream_{database_name}_{schema_name}_{table_name}",
+                "snapshot.mode": "never",  # We handle initial data separately
                 
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -56,10 +59,6 @@ class DebeziumConnectorManager:
                 "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
                 "transforms.route.regex": f"yugabyte-{database_name}-{schema_name}\.{schema_name}\.{table_name}",
                 "transforms.route.replacement": f"bigquery-{bq_table.replace('.', '-')}",
-                
-                # Snapshot configuration
-                "snapshot.mode": "never",  # We handle initial data separately
-                "include.schema.changes": "false",
                 
                 # Error handling
                 "errors.tolerance": "all",
