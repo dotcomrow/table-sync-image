@@ -707,52 +707,52 @@ class PipelineManager:
         self.connector_manager = DebeziumConnectorManager(debezium_url)
         self.publication_manager = YugabytePublicationManager(db_pool)
     
-    async def setup_debezium_connector(self, schema_name: str, table_name: str, config: TableBootstrapConfig):
+    async def setup_debezium_connector(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig):
         """Setup Debezium connector for a table"""
-        logger.info(f"Setting up Debezium connector for {schema_name}.{table_name}")
+        logger.info(f"Setting up Debezium connector for {database_name}.{schema_name}.{table_name}")
         
         try:
-            # Create publication for the table
-            pub_success = await self.publication_manager.create_publication_for_table(schema_name, table_name)
+            # Create publication for the table (need to connect to the correct database)
+            pub_success = await self.publication_manager.create_publication_for_table(database_name, schema_name, table_name)
             if not pub_success:
-                logger.error(f"Failed to create publication for {schema_name}.{table_name}")
+                logger.error(f"Failed to create publication for {database_name}.{schema_name}.{table_name}")
                 return False
             
             # Create Debezium connector
             conn_success = await self.connector_manager.create_connector(
-                schema_name, table_name, config.bq_table
+                database_name, schema_name, table_name, config.bq_table
             )
             if not conn_success:
-                logger.error(f"Failed to create Debezium connector for {schema_name}.{table_name}")
+                logger.error(f"Failed to create Debezium connector for {database_name}.{schema_name}.{table_name}")
                 return False
             
-            logger.info(f"Successfully setup pipeline for {schema_name}.{table_name}")
+            logger.info(f"Successfully setup pipeline for {database_name}.{schema_name}.{table_name}")
             return True
             
         except Exception as e:
-            logger.error(f"Error setting up pipeline for {schema_name}.{table_name}: {e}")
+            logger.error(f"Error setting up pipeline for {database_name}.{schema_name}.{table_name}: {e}")
             return False
     
-    async def remove_debezium_connector(self, schema_name: str, table_name: str):
+    async def remove_debezium_connector(self, database_name: str, schema_name: str, table_name: str):
         """Remove Debezium connector for a table"""
-        logger.info(f"Removing Debezium connector for {schema_name}.{table_name}")
+        logger.info(f"Removing Debezium connector for {database_name}.{schema_name}.{table_name}")
         
         try:
             # Delete Debezium connector
-            conn_success = await self.connector_manager.delete_connector(schema_name, table_name)
+            conn_success = await self.connector_manager.delete_connector(database_name, schema_name, table_name)
             
             # Drop publication
-            pub_success = await self.publication_manager.drop_publication_for_table(schema_name, table_name)
+            pub_success = await self.publication_manager.drop_publication_for_table(database_name, schema_name, table_name)
             
             if conn_success and pub_success:
-                logger.info(f"Successfully removed pipeline for {schema_name}.{table_name}")
+                logger.info(f"Successfully removed pipeline for {database_name}.{schema_name}.{table_name}")
                 return True
             else:
-                logger.warning(f"Partial failure removing pipeline for {schema_name}.{table_name}")
+                logger.warning(f"Partial failure removing pipeline for {database_name}.{schema_name}.{table_name}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error removing pipeline for {schema_name}.{table_name}: {e}")
+            logger.error(f"Error removing pipeline for {database_name}.{schema_name}.{table_name}: {e}")
             return False
 
 class TableSyncManager:
@@ -818,7 +818,7 @@ class TableSyncManager:
         import hashlib
         return hashlib.sha256(comment.encode()).hexdigest() if comment else None
     
-    async def copy_yugabyte_data_to_bigquery(self, schema_name: str, table_name: str, config: TableBootstrapConfig):
+    async def copy_yugabyte_data_to_bigquery(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig):
         """Copy existing data from YugabyteDB to BigQuery"""
         if not self.data_transfer_manager:
             logger.error("Data transfer manager not initialized")
@@ -827,23 +827,30 @@ class TableSyncManager:
         dataset_id, table_id = config.bq_table.split('.')
         
         try:
-            await self.data_transfer_manager.copy_yugabyte_to_bigquery(
-                self.db_manager.pool,
-                schema_name,
-                table_name,
-                dataset_id,
-                table_id,
-                config.columns,
-                batch_size=int(os.getenv("BATCH_SIZE", "10000"))
-            )
-            logger.info(f"Successfully copied data from {schema_name}.{table_name} to BigQuery")
-            return True
+            # Create connection pool for the specific database
+            db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database_name}'
+            db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
             
+            try:
+                await self.data_transfer_manager.copy_yugabyte_to_bigquery(
+                    db_pool,
+                    schema_name,
+                    table_name,
+                    dataset_id,
+                    table_id,
+                    config.columns,
+                    batch_size=int(os.getenv("BATCH_SIZE", "10000"))
+                )
+                logger.info(f"Successfully copied data from {database_name}.{schema_name}.{table_name} to BigQuery")
+                return True
+            finally:
+                await db_pool.close()
+                
         except Exception as e:
-            logger.error(f"Failed to copy data from {schema_name}.{table_name} to BigQuery: {e}")
+            logger.error(f"Failed to copy data from {database_name}.{schema_name}.{table_name} to BigQuery: {e}")
             return False
     
-    async def copy_bigquery_data_to_yugabyte(self, schema_name: str, table_name: str, config: TableBootstrapConfig):
+    async def copy_bigquery_data_to_yugabyte(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig):
         """Copy data from BigQuery to YugabyteDB (overwrite mode)"""
         if not self.data_transfer_manager:
             logger.error("Data transfer manager not initialized")
@@ -852,19 +859,26 @@ class TableSyncManager:
         dataset_id, table_id = config.bq_table.split('.')
         
         try:
-            await self.data_transfer_manager.copy_bigquery_to_yugabyte(
-                self.db_manager.pool,
-                dataset_id,
-                table_id,
-                schema_name,
-                table_name,
-                truncate_target=True
-            )
-            logger.info(f"Successfully copied data from BigQuery to {schema_name}.{table_name}")
-            return True
+            # Create connection pool for the specific database
+            db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database_name}'
+            db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
             
+            try:
+                await self.data_transfer_manager.copy_bigquery_to_yugabyte(
+                    db_pool,
+                    dataset_id,
+                    table_id,
+                    schema_name,
+                    table_name,
+                    truncate_target=True
+                )
+                logger.info(f"Successfully copied data from BigQuery to {database_name}.{schema_name}.{table_name}")
+                return True
+            finally:
+                await db_pool.close()
+                
         except Exception as e:
-            logger.error(f"Failed to copy data from BigQuery to {schema_name}.{table_name}: {e}")
+            logger.error(f"Failed to copy data from BigQuery to {database_name}.{schema_name}.{table_name}: {e}")
             return False
     
     async def process_table_changes(self, current_tables: List[Dict], current_states: Dict[str, TableState]):
@@ -974,11 +988,11 @@ class TableSyncManager:
                 
                 # Copy existing data
                 logger.info(f"   🔄 Copying existing data from YugabyteDB to BigQuery...")
-                data_copy_success = await self.copy_yugabyte_data_to_bigquery(schema_name, table_name, config)
+                data_copy_success = await self.copy_yugabyte_data_to_bigquery(database_name, schema_name, table_name, config)
                 
                 # Setup pipeline
                 logger.info(f"   🔗 Setting up Debezium connector for CDC...")
-                pipeline_success = await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
                 
                 # Save state
                 state = TableState(
@@ -995,11 +1009,11 @@ class TableSyncManager:
             else:
                 logger.info(f"   📊 BigQuery table '{dataset_id}.{table_id}' already exists - copying data FROM BigQuery")
                 # BigQuery table exists - copy data from BigQuery to YugabyteDB
-                data_copy_success = await self.copy_bigquery_data_to_yugabyte(schema_name, table_name, config)
+                data_copy_success = await self.copy_bigquery_data_to_yugabyte(database_name, schema_name, table_name, config)
                 
                 # Setup pipeline
                 logger.info(f"   🔗 Setting up Debezium connector for CDC...")
-                pipeline_success = await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
                 
                 # Save state
                 state = TableState(
@@ -1085,7 +1099,7 @@ class TableSyncManager:
         
         if state.pipeline_configured:
             # Remove pipeline
-            await self.pipeline_manager.remove_debezium_connector(state.schema_name, state.table_name)
+            await self.pipeline_manager.remove_debezium_connector(state.database_name, state.schema_name, state.table_name)
         
         # Remove state record
         await self.db_manager.delete_table_state(state.database_name, state.schema_name, state.table_name)
