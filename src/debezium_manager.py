@@ -219,6 +219,13 @@ class DebeziumConnectorManager:
             if "password" not in key.lower():
                 logger.info(f"  {key}: {value}")
         
+        # PREFLIGHT CHECK: Verify Kafka Connect is responsive
+        logger.info(f"🔍 Checking Kafka Connect service health before creating connector...")
+        connect_healthy = await self._check_connect_health()
+        if not connect_healthy:
+            logger.error(f"❌ Kafka Connect service is not responsive - aborting connector creation")
+            return False
+        
         # RETRY LOGIC: Try up to 3 times with cleanup between attempts
         max_retries = 3
         for attempt in range(max_retries):
@@ -232,23 +239,40 @@ class DebeziumConnectorManager:
                     logger.info(f"Performing additional CDC cleanup before retry {attempt + 1}")
                     await self.cleanup_stale_cdc_stream(database_name, schema_name, table_name)
                 
+                # Log detailed request information
+                logger.info(f"🔌 Sending POST request to: {self.connectors_endpoint}")
+                logger.info(f"🔌 Request timeout: 120 seconds")
+                logger.info(f"🔌 Connector config size: {len(json.dumps(connector_config))} characters")
+                
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:  # Increased timeout
+                    start_time = asyncio.get_event_loop().time()
+                    
                     async with session.post(
                         self.connectors_endpoint,
                         json=connector_config,
                         headers={"Content-Type": "application/json"}
                     ) as response:
+                        end_time = asyncio.get_event_loop().time()
+                        request_duration = end_time - start_time
+                        
+                        logger.info(f"📡 HTTP request completed in {request_duration:.2f} seconds")
+                        logger.info(f"📡 Response status: {response.status}")
+                        
                         response_text = await response.text()
+                        logger.info(f"📡 Response body length: {len(response_text)} characters")
                         
                         if response.status == 201:
                             logger.info(f"✅ HTTP request succeeded - created Debezium connector: {connector_name} (attempt {attempt + 1})")
                             
                             # Wait a moment for connector to initialize
+                            logger.info(f"⏳ Waiting 3 seconds for connector initialization...")
                             await asyncio.sleep(3)
                             
                             # Check connector status to ensure it's actually working
+                            logger.info(f"🔍 Fetching connector status for {connector_name}...")
                             status = await self.get_connector_status(connector_name)
                             if status:
+                                logger.info(f"📊 Connector status retrieved successfully")
                                 connector_state = status.get('connector', {}).get('state', 'UNKNOWN')
                                 logger.info(f"Connector {connector_name} state: {connector_state}")
                                 
@@ -296,6 +320,45 @@ class DebeziumConnectorManager:
                                 # Still consider this a success if we got a 201 response
                                 return True
                                 
+                        elif response.status == 500:
+                            logger.error(f"❌ HTTP 500 - Internal Server Error during connector creation (attempt {attempt + 1})")
+                            logger.error(f"Response body: {response_text}")
+                            
+                            # Parse the 500 error for yb-admin stream conflicts
+                            if "yb-admin stream" in response_text.lower():
+                                logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in HTTP 500 response!")
+                                logger.error(f"Error: Cannot create a replication slot on the same namespace which already has a yb-admin stream on it")
+                                
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Will attempt aggressive cleanup and retry...")
+                                    # Force a longer wait to let any previous cleanup take effect  
+                                    await asyncio.sleep(15)
+                                else:
+                                    logger.error(f"❌ PERSISTENT YB-ADMIN STREAM CONFLICT")
+                                    logger.error(f"Manual intervention may be required:")
+                                    logger.error(f"  1. Connect to YugabyteDB master: {self.db_master_addresses}")
+                                    logger.error(f"  2. Run: yb-admin --master_addresses {self.db_master_addresses} list_cdc_streams")
+                                    logger.error(f"  3. Delete conflicting streams for database: {database_name}")
+                                    return False
+                            elif "replication slot" in response_text.lower():
+                                logger.error(f"🚨 YugabyteDB replication slot conflict detected in HTTP 500 response!")
+                                logger.error(f"This suggests existing CDC streams are preventing slot creation")
+                                
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Will attempt aggressive cleanup and retry...")
+                                    await asyncio.sleep(15)
+                                else:
+                                    logger.error(f"❌ PERSISTENT REPLICATION SLOT CONFLICT")
+                                    logger.error(f"Manual CDC cleanup may be required")
+                                    return False
+                            else:
+                                logger.error(f"❌ Unknown HTTP 500 error during connector creation")
+                                if attempt == max_retries - 1:
+                                    return False
+                            
+                            # Break to attempt retry
+                            break
+                                
                         else:
                             logger.error(f"Failed to create connector {connector_name} (attempt {attempt + 1}): {response.status}")
                             logger.error(f"Response body: {response_text}")
@@ -340,10 +403,28 @@ class DebeziumConnectorManager:
                             
                             # Break to attempt retry
                             break
+            
+            except asyncio.TimeoutError as e:
+                logger.error(f"⏰ TIMEOUT during connector creation attempt {attempt + 1}: {e}")
+                logger.error(f"This suggests the Kafka Connect service is overloaded or YugabyteDB is not responding")
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Connector creation failed after {max_retries} timeout attempts")
+                    return False
+                                
+            except aiohttp.ClientError as e:
+                logger.error(f"🌐 CLIENT ERROR during connector creation attempt {attempt + 1}: {e}")
+                logger.error(f"This suggests network or HTTP-level issues with Kafka Connect")
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Connector creation failed after {max_retries} client error attempts")
+                    return False
                                 
             except Exception as e:
-                logger.error(f"Exception during connector creation attempt {attempt + 1}: {e}")
+                logger.error(f"❗ UNEXPECTED EXCEPTION during connector creation attempt {attempt + 1}: {e}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                import traceback
+                logger.error(f"Stack trace: {traceback.format_exc()}")
                 if attempt == max_retries - 1:
+                    logger.error(f"❌ Connector creation failed after {max_retries} attempts with unexpected exceptions")
                     return False
         
         # If we reach here without success, return False
@@ -630,17 +711,56 @@ class DebeziumConnectorManager:
         """Get connector status"""
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.connectors_endpoint}/{connector_name}/status") as response:
+            status_url = f"{self.connectors_endpoint}/{connector_name}/status"
+            logger.info(f"🔍 Requesting connector status from: {status_url}")
+            
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.get(status_url) as response:
+                    logger.info(f"📡 Status request response: {response.status}")
+                    
                     if response.status == 200:
-                        return await response.json()
+                        status_data = await response.json()
+                        logger.info(f"📊 Status data keys: {list(status_data.keys())}")
+                        return status_data
+                    elif response.status == 404:
+                        logger.warning(f"❌ Connector {connector_name} not found (404)")
+                        return None
                     else:
+                        response_text = await response.text()
+                        logger.error(f"❌ Failed to get connector status: {response.status}")
+                        logger.error(f"Response: {response_text[:500]}...")  # First 500 chars
                         return None
                         
+        except asyncio.TimeoutError as e:
+            logger.error(f"⏰ Timeout getting connector status {connector_name}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error getting connector status {connector_name}: {e}")
+            logger.error(f"❗ Error getting connector status {connector_name}: {e}")
             return None
     
+    async def _check_connect_health(self) -> bool:
+        """Check if Kafka Connect service is healthy and responsive"""
+        try:
+            logger.info(f"🩺 Testing Kafka Connect health at: {self.connector_url}")
+            
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                # Try to list connectors as a health check
+                async with session.get(self.connectors_endpoint) as response:
+                    if response.status == 200:
+                        connectors = await response.json()
+                        logger.info(f"✅ Kafka Connect is healthy - found {len(connectors)} existing connectors")
+                        return True
+                    else:
+                        logger.error(f"❌ Kafka Connect health check failed: {response.status}")
+                        return False
+                        
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ Kafka Connect health check timed out")
+            return False
+        except Exception as e:
+            logger.error(f"❗ Kafka Connect health check error: {e}")
+            return False
+
     async def list_connectors(self) -> list:
         """List all connectors"""
         
