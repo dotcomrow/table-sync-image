@@ -38,20 +38,6 @@ class DebeziumConnectorManager:
         self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", self.db_password)
         self.db_master_addresses = os.getenv("DEBEZIUM_MASTER_ADDRESSES", self.db_master_addresses)
     
-    def _generate_stream_id(self, database_name: str, schema_name: str, table_name: str) -> str:
-        """Generate a proper 32-character hex stream ID for YugabyteDB"""
-        import hashlib
-        
-        # Create a unique identifier from database, schema, and table
-        identifier = f"{database_name}.{schema_name}.{table_name}"
-        
-        # Generate SHA-256 hash and take first 32 characters (16 bytes in hex)
-        hash_object = hashlib.sha256(identifier.encode())
-        stream_id = hash_object.hexdigest()[:32]
-        
-        logger.info(f"Generated stream ID for {identifier}: {stream_id}")
-        return stream_id
-    
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
         
@@ -93,8 +79,7 @@ class DebeziumConnectorManager:
                 "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
                 
-                # YugabyteDB specific settings - generate proper 32-char hex stream ID
-                "database.streamid": self._generate_stream_id(database_name, schema_name, table_name),
+                # YugabyteDB specific settings - let Debezium auto-create CDC streams
                 "snapshot.mode": "never",  # We handle initial data separately
                 
                 # Try without transforms first to see if connector works
@@ -103,6 +88,10 @@ class DebeziumConnectorManager:
                 "value.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "key.converter.schemas.enable": "false",
                 "value.converter.schemas.enable": "false",
+                
+                # YugabyteDB CDC specific settings
+                "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
+                "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
                 
                 # Error handling
                 "errors.tolerance": "all",
@@ -221,18 +210,26 @@ class DebeziumConnectorManager:
         database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
         db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
         
-        stream_id = self._generate_stream_id(database_name, schema_name, table_name)
-        logger.info(f"Attempting to clean up potential stale CDC stream: {stream_id}")
+        table_identifier = f"{database_name}.{schema_name}.{table_name}"
+        logger.info(f"Attempting to clean up potential stale CDC publications for: {table_identifier}")
         
         try:
             conn = await asyncpg.connect(db_url)
             try:
-                # Drop any existing publications that might be related
-                try:
-                    await conn.execute(f"DROP PUBLICATION IF EXISTS {stream_id}")
-                    logger.info(f"Dropped publication {stream_id} if it existed")
-                except Exception as e:
-                    logger.debug(f"Failed to drop publication {stream_id}: {e}")
+                # Try to drop common publication name patterns that might conflict
+                publication_patterns = [
+                    f"yugabyte_{database_name}_{schema_name}_{table_name}",
+                    f"debezium_{database_name}_{schema_name}_{table_name}",
+                    f"{schema_name}_{table_name}_pub",
+                    f"{database_name}_{schema_name}_{table_name}_stream"  # old format
+                ]
+                
+                for pub_name in publication_patterns:
+                    try:
+                        await conn.execute(f"DROP PUBLICATION IF EXISTS {pub_name}")
+                        logger.debug(f"Dropped publication {pub_name} if it existed")
+                    except Exception as e:
+                        logger.debug(f"Failed to drop publication {pub_name}: {e}")
                 
                 # Try alternative publication names
                 alt_names = [
@@ -253,7 +250,7 @@ class DebeziumConnectorManager:
                     slots_to_drop = await conn.fetch("""
                         SELECT slot_name FROM pg_replication_slots 
                         WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3
-                    """, f"%{table_name}%", f"%{stream_id}%", f"%{schema_name}%")
+                    """, f"%{table_name}%", f"%{database_name}%", f"%{schema_name}%")
                     
                     for slot in slots_to_drop:
                         try:
@@ -265,7 +262,7 @@ class DebeziumConnectorManager:
                 except Exception as e:
                     logger.debug(f"Failed to query/drop replication slots: {e}")
                 
-                logger.info(f"CDC stream cleanup completed for {stream_id}")
+                logger.info(f"CDC stream cleanup completed for {table_identifier}")
                 return True
                     
             finally:
