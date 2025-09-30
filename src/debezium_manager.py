@@ -45,7 +45,7 @@ class DebeziumConnectorManager:
         try:
             import asyncpg
             
-            # Get the base database URL and discover all databases
+            # Get the base database URL and discover all databases  
             database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
             base_url = database_url.rsplit('/', 1)[0]
             
@@ -64,6 +64,12 @@ class DebeziumConnectorManager:
                     db_name = db_record['datname']
                     cleaned_count = await self._cleanup_database_cdc_streams(base_url, db_name)
                     total_cleaned += cleaned_count
+                
+                # Add a wait period to let YugabyteDB process the cleanup
+                if total_cleaned > 0:
+                    logger.info(f"Waiting 5 seconds for YugabyteDB to process CDC cleanup...")
+                    import asyncio
+                    await asyncio.sleep(5)
                 
                 logger.info(f"✅ Startup CDC cleanup completed: {total_cleaned} streams/publications cleaned across {len(databases)} databases")
                 return True
@@ -296,51 +302,32 @@ class DebeziumConnectorManager:
         try:
             conn = await asyncpg.connect(db_url)
             try:
-                # Try to drop common publication name patterns that might conflict
-                publication_patterns = [
-                    f"yugabyte_{database_name}_{schema_name}_{table_name}",
-                    f"debezium_{database_name}_{schema_name}_{table_name}",
-                    f"{schema_name}_{table_name}_pub",
-                    f"{database_name}_{schema_name}_{table_name}_stream"  # old format
-                ]
+                # AGGRESSIVE CLEANUP: Drop ALL publications and slots in this database
+                # since YugabyteDB may have internal naming conflicts
                 
-                for pub_name in publication_patterns:
+                # 1. Drop ALL publications
+                all_pubs = await conn.fetch("SELECT pubname FROM pg_publication")
+                for pub in all_pubs:
                     try:
-                        await conn.execute(f"DROP PUBLICATION IF EXISTS {pub_name}")
-                        logger.debug(f"Dropped publication {pub_name} if it existed")
+                        await conn.execute(f"DROP PUBLICATION IF EXISTS {pub['pubname']} CASCADE")
+                        logger.info(f"🧹 AGGRESSIVE: Dropped publication {pub['pubname']}")
                     except Exception as e:
-                        logger.debug(f"Failed to drop publication {pub_name}: {e}")
+                        logger.debug(f"Failed to drop publication {pub['pubname']}: {e}")
                 
-                # Try alternative publication names
-                alt_names = [
-                    f"yugabyte_{database_name}_{schema_name}_{table_name}",
-                    f"debezium_{database_name}_{schema_name}_{table_name}",
-                    f"{schema_name}_{table_name}_pub"
-                ]
-                
-                for alt_name in alt_names:
+                # 2. Drop ALL replication slots
+                all_slots = await conn.fetch("SELECT slot_name FROM pg_replication_slots")
+                for slot in all_slots:
                     try:
-                        await conn.execute(f"DROP PUBLICATION IF EXISTS {alt_name}")
-                        logger.debug(f"Dropped alternative publication {alt_name} if it existed")
+                        await conn.execute(f"SELECT pg_drop_replication_slot('{slot['slot_name']}')")
+                        logger.info(f"🧹 AGGRESSIVE: Dropped replication slot {slot['slot_name']}")
                     except Exception as e:
-                        logger.debug(f"Failed to drop alternative publication {alt_name}: {e}")
+                        logger.debug(f"Failed to drop replication slot {slot['slot_name']}: {e}")
                 
-                # Try to force cleanup any replication slots with similar names
-                try:
-                    slots_to_drop = await conn.fetch("""
-                        SELECT slot_name FROM pg_replication_slots 
-                        WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3
-                    """, f"%{table_name}%", f"%{database_name}%", f"%{schema_name}%")
-                    
-                    for slot in slots_to_drop:
-                        try:
-                            await conn.execute(f"SELECT pg_drop_replication_slot('{slot['slot_name']}')")
-                            logger.info(f"Dropped replication slot: {slot['slot_name']}")
-                        except Exception as e:
-                            logger.debug(f"Failed to drop replication slot {slot['slot_name']}: {e}")
-                            
-                except Exception as e:
-                    logger.debug(f"Failed to query/drop replication slots: {e}")
+                # 3. Wait for YugabyteDB to process
+                if all_pubs or all_slots:
+                    logger.info(f"Waiting 3 seconds for YugabyteDB to process aggressive cleanup...")
+                    import asyncio
+                    await asyncio.sleep(3)
                 
                 logger.info(f"CDC stream cleanup completed for {table_identifier}")
                 return True
