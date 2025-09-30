@@ -65,9 +65,13 @@ class DebeziumConnectorManager:
                     cleaned_count = await self._cleanup_database_cdc_streams(base_url, db_name)
                     total_cleaned += cleaned_count
                 
-                # Add a wait period to let YugabyteDB process the cleanup
+                # Add a longer wait period to let YugabyteDB process the cleanup
                 if total_cleaned > 0:
-                    logger.info(f"Waiting 5 seconds for YugabyteDB to process CDC cleanup...")
+                    logger.info(f"Waiting 10 seconds for YugabyteDB to process CDC cleanup...")
+                    import asyncio
+                    await asyncio.sleep(10)
+                else:
+                    logger.info(f"No CDC streams found to clean up, but waiting 5 seconds for YugabyteDB stabilization...")
                     import asyncio
                     await asyncio.sleep(5)
                 
@@ -228,7 +232,23 @@ class DebeziumConnectorManager:
                                     
                                     # Handle specific error cases
                                     message = error_data['message'].lower()
-                                    if "timeout" in message:
+                                    if "yb-admin stream" in message and "replication slot" in message:
+                                        logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected!")
+                                        logger.error(f"This indicates existing CDC streams created via yb-admin tool")
+                                        
+                                        if attempt < max_retries - 1:
+                                            logger.warning(f"Will attempt aggressive cleanup and retry...")
+                                            # Force a longer wait to let any previous cleanup take effect
+                                            await asyncio.sleep(15)
+                                        else:
+                                            logger.error(f"❌ PERSISTENT YB-ADMIN STREAM CONFLICT")
+                                            logger.error(f"Manual intervention may be required:")
+                                            logger.error(f"  1. Connect to YugabyteDB master: {self.db_master_addresses}")
+                                            logger.error(f"  2. Run: yb-admin --master_addresses {self.db_master_addresses} list_cdc_streams")
+                                            logger.error(f"  3. Delete conflicting streams for database: {database_name}")
+                                            return False
+                                            
+                                    elif "timeout" in message:
                                         if attempt < max_retries - 1:
                                             logger.warning(f"Connector creation timed out - will retry after cleanup")
                                         else:
@@ -323,11 +343,34 @@ class DebeziumConnectorManager:
                     except Exception as e:
                         logger.debug(f"Failed to drop replication slot {slot['slot_name']}: {e}")
                 
-                # 3. Wait for YugabyteDB to process
+                # 3. Force terminate any active connections that might be holding CDC resources
+                try:
+                    # Terminate any connections that might be related to CDC
+                    cdc_connections = await conn.fetch("""
+                        SELECT pid, application_name, state, query 
+                        FROM pg_stat_activity 
+                        WHERE application_name LIKE '%debezium%' 
+                           OR application_name LIKE '%cdc%'
+                           OR query LIKE '%publication%'
+                           OR query LIKE '%replication%'
+                           OR state = 'idle in transaction'
+                    """)
+                    
+                    for conn_info in cdc_connections:
+                        try:
+                            await conn.execute(f"SELECT pg_terminate_backend({conn_info['pid']})")
+                            logger.info(f"🧹 TERMINATED: Connection PID {conn_info['pid']} ({conn_info['application_name']})")
+                        except Exception as e:
+                            logger.debug(f"Could not terminate PID {conn_info['pid']}: {e}")
+                            
+                except Exception as e:
+                    logger.debug(f"Could not check/terminate CDC connections: {e}")
+                
+                # 4. Wait longer for YugabyteDB to process
                 if all_pubs or all_slots:
-                    logger.info(f"Waiting 3 seconds for YugabyteDB to process aggressive cleanup...")
+                    logger.info(f"Waiting 8 seconds for YugabyteDB to process aggressive cleanup...")
                     import asyncio
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(8)
                 
                 logger.info(f"CDC stream cleanup completed for {table_identifier}")
                 return True
