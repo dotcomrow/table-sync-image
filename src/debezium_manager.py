@@ -150,36 +150,68 @@ class DebeziumConnectorManager:
         database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
         db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
         
+        logger.info(f"Checking CDC stream status for {database_name}.{schema_name}.{table_name}")
+        
         try:
             conn = await asyncpg.connect(db_url)
             try:
-                # Check if table is part of any CDC stream
-                # YugabyteDB stores CDC stream information in system tables
-                stream_check = await conn.fetchval("""
-                    SELECT COUNT(*) > 0 FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace 
-                    WHERE c.relname = $1 AND n.nspname = $2
-                    AND EXISTS (
-                        SELECT 1 FROM pg_replication_slots 
-                        WHERE slot_name LIKE '%' || $1 || '%'
-                    )
-                """, table_name, schema_name)
+                # First, check all replication slots
+                all_slots = await conn.fetch("""
+                    SELECT slot_name, slot_type, active, database 
+                    FROM pg_replication_slots
+                """)
                 
-                if stream_check:
-                    logger.info(f"CDC stream detected for {database_name}.{schema_name}.{table_name}")
-                    return True
+                logger.info(f"Found {len(all_slots)} total replication slots in {database_name}")
+                for slot in all_slots:
+                    logger.info(f"  Slot: {slot['slot_name']}, type: {slot['slot_type']}, active: {slot['active']}")
                 
-                # Alternative check - look for any replication slots that might be related
-                slots = await conn.fetch("""
+                # Check for slots that might be related to our table
+                table_slots = await conn.fetch("""
                     SELECT slot_name, slot_type, active 
                     FROM pg_replication_slots 
-                    WHERE slot_name LIKE $1
-                """, f"%{table_name}%")
+                    WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3
+                """, f"%{table_name}%", f"%{schema_name}%", f"%{database_name}%")
                 
-                if slots:
-                    logger.info(f"Found {len(slots)} replication slots for table {table_name}: {[s['slot_name'] for s in slots]}")
+                if table_slots:
+                    logger.info(f"Found {len(table_slots)} related replication slots for {database_name}.{schema_name}.{table_name}")
+                    for slot in table_slots:
+                        logger.info(f"  Related slot: {slot['slot_name']}, active: {slot['active']}")
                     return True
                 
+                # YugabyteDB specific: Check if table has CDC enabled
+                # Try to detect CDC by attempting a simple operation that would fail if CDC is active
+                try:
+                    # Check table attributes that might indicate CDC
+                    table_info = await conn.fetchrow("""
+                        SELECT c.relname, c.relkind, c.relhassubclass, n.nspname
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace 
+                        WHERE c.relname = $1 AND n.nspname = $2
+                    """, table_name, schema_name)
+                    
+                    if table_info:
+                        logger.info(f"Table info: {dict(table_info)}")
+                    
+                    # Alternative approach: Try to create a test publication (this would fail if CDC is active)
+                    test_pub_name = f"test_cdc_check_{table_name}"
+                    try:
+                        await conn.execute(f"CREATE PUBLICATION {test_pub_name} FOR TABLE {schema_name}.{table_name}")
+                        # If we got here, no CDC is active - clean up test publication
+                        await conn.execute(f"DROP PUBLICATION {test_pub_name}")
+                        logger.info(f"No CDC detected for {database_name}.{schema_name}.{table_name} (test publication succeeded)")
+                        return False
+                    except Exception as pub_e:
+                        if "already exists" in str(pub_e).lower() or "cdc" in str(pub_e).lower():
+                            logger.info(f"CDC likely active for {database_name}.{schema_name}.{table_name} (publication test failed: {pub_e})")
+                            return True
+                        else:
+                            logger.debug(f"Publication test failed for other reason: {pub_e}")
+                            return False
+                            
+                except Exception as check_e:
+                    logger.debug(f"Table info check failed: {check_e}")
+                
+                logger.info(f"No CDC stream detected for {database_name}.{schema_name}.{table_name}")
                 return False
                 
             finally:

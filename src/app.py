@@ -883,7 +883,7 @@ class TableSyncManager:
         except Exception as e:
             # If we get a CDC error, that might actually mean the stream is working
             if "CDC" in str(e) and "rewrite" in str(e):
-                logger.info(f"Table {database_name}.{schema_name}.{table_name} is already part of CDC - data copy not needed")
+                logger.warning(f"Table {database_name}.{schema_name}.{table_name} is already part of CDC - data copy not needed")
                 return True
             logger.error(f"Failed to copy data from BigQuery to {database_name}.{schema_name}.{table_name}: {e}")
             return False

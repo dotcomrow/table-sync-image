@@ -160,11 +160,23 @@ class DataTransferManager:
                     await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
                     logger.info(f"Truncated table {schema_name}.{table_name}")
                 except Exception as e:
+                    error_str = str(e).lower()
+                    # Check for CDC-related errors
+                    if "cdc" in error_str and "rewrite" in error_str:
+                        logger.warning(f"Table {schema_name}.{table_name} is part of CDC stream - cannot truncate: {e}")
+                        raise Exception(f"Cannot rewrite a table that is part of CDC: {schema_name}.{table_name}")
                     # If regular truncate fails due to foreign keys, try CASCADE
-                    if "foreign key constraint" in str(e).lower():
+                    elif "foreign key constraint" in error_str:
                         logger.warning(f"Regular truncate failed due to foreign keys, using CASCADE: {e}")
-                        await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name} CASCADE")
-                        logger.info(f"Truncated table {schema_name}.{table_name} with CASCADE")
+                        try:
+                            await conn.execute(f"TRUNCATE TABLE {schema_name}.{table_name} CASCADE")
+                            logger.info(f"Truncated table {schema_name}.{table_name} with CASCADE")
+                        except Exception as cascade_e:
+                            if "cdc" in str(cascade_e).lower() and "rewrite" in str(cascade_e).lower():
+                                logger.warning(f"Table {schema_name}.{table_name} is part of CDC stream - cannot truncate even with CASCADE: {cascade_e}")
+                                raise Exception(f"Cannot rewrite a table that is part of CDC: {schema_name}.{table_name}")
+                            else:
+                                raise cascade_e
                     else:
                         raise
             
