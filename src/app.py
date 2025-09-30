@@ -1420,6 +1420,14 @@ async def run_cdc_compatibility_test():
         # Step 2: Create minimal CDC connector
         logger.info("🧪 Step 2: Creating minimal CDC connector...")
         
+        # Get YugabyteDB master addresses from environment
+        master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES") or os.getenv("DEBEZIUM_MASTER_ADDRESSES")
+        if not master_addresses:
+            logger.error("❌ YUGABYTE_MASTER_ADDRESSES or DEBEZIUM_MASTER_ADDRESSES environment variable required")
+            raise Exception("Master addresses not configured - cannot create CDC connector")
+        
+        logger.info(f"🧪 Using master addresses: {master_addresses}")
+        
         connector_config = {
             "name": "yugabyte-cdc-compatibility-test",
             "config": {
@@ -1431,6 +1439,7 @@ async def run_cdc_compatibility_test():
                 "database.dbname": db_name,
                 "database.server.name": "cdc-compatibility-test",
                 "table.include.list": "public.cdc_test_simple",
+                "database.master.addresses": master_addresses,
                 
                 # Minimal, safe configuration
                 "before.image.mode": "never",
