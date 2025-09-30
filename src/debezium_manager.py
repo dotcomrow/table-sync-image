@@ -75,6 +75,29 @@ class DebeziumConnectorManager:
                     import asyncio
                     await asyncio.sleep(5)
                 
+                # After cleanup, let's also check if there are any remaining issues
+                logger.info(f"🔍 Post-cleanup verification...")
+                for database_name in databases:
+                    try:
+                        db_url = base_url + f'/{database_name}'
+                        check_conn = await asyncpg.connect(db_url)
+                        try:
+                            remaining_pubs = await check_conn.fetchval("SELECT COUNT(*) FROM pg_publication")
+                            remaining_slots = await check_conn.fetchval("SELECT COUNT(*) FROM pg_replication_slots")
+                            active_conns = await check_conn.fetchval("""
+                                SELECT COUNT(*) FROM pg_stat_activity 
+                                WHERE pid != pg_backend_pid() AND (
+                                    application_name LIKE '%cdc%' OR 
+                                    application_name LIKE '%debezium%' OR
+                                    query LIKE '%publication%'
+                                )
+                            """)
+                            logger.info(f"   {database_name}: {remaining_pubs} publications, {remaining_slots} slots, {active_conns} CDC connections")
+                        finally:
+                            await check_conn.close()
+                    except Exception as e:
+                        logger.debug(f"Could not verify cleanup for {database_name}: {e}")
+                
                 logger.info(f"✅ Startup CDC cleanup completed: {total_cleaned} streams/publications cleaned across {len(databases)} databases")
                 return True
                 
@@ -218,8 +241,61 @@ class DebeziumConnectorManager:
                         response_text = await response.text()
                         
                         if response.status == 201:
-                            logger.info(f"Successfully created Debezium connector: {connector_name} (attempt {attempt + 1})")
-                            return True
+                            logger.info(f"✅ HTTP request succeeded - created Debezium connector: {connector_name} (attempt {attempt + 1})")
+                            
+                            # Wait a moment for connector to initialize
+                            await asyncio.sleep(3)
+                            
+                            # Check connector status to ensure it's actually working
+                            status = await self.get_connector_status(connector_name)
+                            if status:
+                                connector_state = status.get('connector', {}).get('state', 'UNKNOWN')
+                                logger.info(f"Connector {connector_name} state: {connector_state}")
+                                
+                                # Check for task failures that might indicate yb-admin stream conflicts
+                                tasks = status.get('tasks', [])
+                                for i, task in enumerate(tasks):
+                                    task_state = task.get('state', 'UNKNOWN')
+                                    logger.info(f"Task {i} state: {task_state}")
+                                    
+                                    if task_state == 'FAILED':
+                                        task_trace = task.get('trace', '')
+                                        logger.error(f"❌ Task {i} failed with trace: {task_trace}")
+                                        
+                                        # Check for yb-admin stream conflict in task failure
+                                        if "yb-admin stream" in task_trace.lower() or "replication slot" in task_trace.lower():
+                                            logger.error(f"🚨 YugabyteDB yb-admin stream conflict detected in task failure!")
+                                            logger.error(f"This indicates existing CDC streams created via yb-admin tool")
+                                            
+                                            # Delete the failed connector
+                                            await self.delete_connector(database_name, schema_name, table_name)
+                                            
+                                            if attempt < max_retries - 1:
+                                                logger.warning(f"Will attempt aggressive cleanup and retry...")
+                                                # Force a longer wait to let any previous cleanup take effect
+                                                await asyncio.sleep(15)
+                                                break  # Break to retry
+                                            else:
+                                                logger.error(f"❌ PERSISTENT YB-ADMIN STREAM CONFLICT")
+                                                logger.error(f"Manual intervention may be required:")
+                                                logger.error(f"  1. Connect to YugabyteDB master: {self.db_master_addresses}")
+                                                logger.error(f"  2. Run: yb-admin --master_addresses {self.db_master_addresses} list_cdc_streams")
+                                                logger.error(f"  3. Delete conflicting streams for database: {database_name}")
+                                                return False
+                                
+                                # If connector and all tasks are healthy, return success
+                                if connector_state in ['RUNNING', 'PAUSED'] and all(task.get('state') != 'FAILED' for task in tasks):
+                                    logger.info(f"✅ Connector {connector_name} is healthy and running")
+                                    return True
+                                else:
+                                    logger.warning(f"⚠️ Connector {connector_name} created but not healthy (connector: {connector_state})")
+                                    if attempt == max_retries - 1:
+                                        return False
+                            else:
+                                logger.warning(f"⚠️ Could not get status for newly created connector {connector_name}")
+                                # Still consider this a success if we got a 201 response
+                                return True
+                                
                         else:
                             logger.error(f"Failed to create connector {connector_name} (attempt {attempt + 1}): {response.status}")
                             logger.error(f"Response body: {response_text}")
@@ -261,6 +337,9 @@ class DebeziumConnectorManager:
                             # If this is the last attempt, return False
                             if attempt == max_retries - 1:
                                 return False
+                            
+                            # Break to attempt retry
+                            break
                                 
             except Exception as e:
                 logger.error(f"Exception during connector creation attempt {attempt + 1}: {e}")
@@ -345,23 +424,45 @@ class DebeziumConnectorManager:
                 
                 # 3. Force terminate any active connections that might be holding CDC resources
                 try:
+                    # First, get detailed connection info
+                    all_connections = await conn.fetch("""
+                        SELECT pid, application_name, state, query, backend_start, state_change
+                        FROM pg_stat_activity 
+                        WHERE pid != pg_backend_pid()
+                    """)
+                    
+                    logger.info(f"🔍 Found {len(all_connections)} total active connections in {database_name}")
+                    
                     # Terminate any connections that might be related to CDC
                     cdc_connections = await conn.fetch("""
-                        SELECT pid, application_name, state, query 
+                        SELECT pid, application_name, state, query, backend_start
                         FROM pg_stat_activity 
-                        WHERE application_name LIKE '%debezium%' 
+                        WHERE pid != pg_backend_pid()
+                          AND (application_name LIKE '%debezium%' 
                            OR application_name LIKE '%cdc%'
+                           OR application_name LIKE '%yugabyte%'
                            OR query LIKE '%publication%'
                            OR query LIKE '%replication%'
+                           OR query LIKE '%cdc%'
                            OR state = 'idle in transaction'
+                           OR state = 'active')
                     """)
+                    
+                    logger.info(f"🔍 Found {len(cdc_connections)} potentially CDC-related connections")
                     
                     for conn_info in cdc_connections:
                         try:
+                            logger.info(f"🧹 TERMINATING: PID {conn_info['pid']} - {conn_info['application_name']} ({conn_info['state']})")
+                            if conn_info['query']:
+                                logger.info(f"   Query: {conn_info['query'][:100]}...")
                             await conn.execute(f"SELECT pg_terminate_backend({conn_info['pid']})")
-                            logger.info(f"🧹 TERMINATED: Connection PID {conn_info['pid']} ({conn_info['application_name']})")
+                            logger.info(f"✅ Successfully terminated PID {conn_info['pid']}")
                         except Exception as e:
                             logger.debug(f"Could not terminate PID {conn_info['pid']}: {e}")
+                            
+                    if cdc_connections:
+                        logger.info(f"🕐 Waiting 3 seconds for connection termination to take effect...")
+                        await asyncio.sleep(3)
                             
                 except Exception as e:
                     logger.debug(f"Could not check/terminate CDC connections: {e}")
