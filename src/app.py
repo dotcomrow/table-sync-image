@@ -48,19 +48,27 @@ class TableBootstrapConfig:
             # Clean up comment text - remove comments and parse JSON
             cleaned = '\n'.join(line for line in comment_text.split('\n') 
                               if not line.strip().startswith('//'))
+            
+            logger.info(f"🔍 Parsing comment: {cleaned}")
             config_data = json.loads(cleaned)
+            logger.info(f"🔍 Parsed JSON: {config_data}")
             
             bootstrap = config_data.get('bootstrap', {})
             if not bootstrap:
+                logger.info("🔍 No bootstrap section found in comment")
                 return None
-                
-            return cls(
+            
+            logger.info(f"🔍 Bootstrap config: {bootstrap}")
+            config = cls(
                 enabled=bootstrap.get('enabled', False),
                 bq_table=bootstrap.get('bq', ''),
                 columns=bootstrap.get('columns')
             )
+            logger.info(f"🔍 Created config: enabled={config.enabled}, bq_table={config.bq_table}")
+            return config
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning(f"Failed to parse table comment: {e}")
+            logger.warning(f"Comment text was: {comment_text}")
             return None
 
 @dataclass
@@ -562,8 +570,8 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             await conn.execute(query, database_name, schema_name, table_name)
     
-    async def get_table_columns(self, schema_name: str, table_name: str) -> List[Dict]:
-        """Get column information for a table"""
+    async def get_table_columns(self, database_name: str, schema_name: str, table_name: str) -> List[Dict]:
+        """Get column information for a table from a specific database"""
         query = """
         SELECT column_name, data_type, is_nullable, column_default, ordinal_position
         FROM information_schema.columns
@@ -571,9 +579,15 @@ class DatabaseManager:
         ORDER BY ordinal_position;
         """
         
-        async with self.pool.acquire() as conn:
+        # Create connection to the specific database
+        db_url = DATABASE_URL.rsplit('/', 1)[0] + f'/{database_name}'
+        conn = await asyncpg.connect(db_url)
+        
+        try:
             rows = await conn.fetch(query, schema_name, table_name)
             return [dict(row) for row in rows]
+        finally:
+            await conn.close()
 
 class BigQueryManager:
     def __init__(self, project_id: str):
@@ -875,6 +889,12 @@ class TableSyncManager:
             if comment:
                 comment_hash = self._calculate_comment_hash(comment)
                 bootstrap_config = TableBootstrapConfig.from_comment(comment)
+                
+                # Debug logging for bootstrap config parsing
+                if bootstrap_config:
+                    logger.info(f"🔍 Parsed bootstrap config for {table_key}: enabled={bootstrap_config.enabled}, bq_table={bootstrap_config.bq_table}")
+                elif comment.strip():
+                    logger.debug(f"📝 Table {table_key} has comment but no valid bootstrap config: {comment[:100]}...")
             
             current_state = current_states.get(table_key)
             
@@ -882,6 +902,7 @@ class TableSyncManager:
             if current_state is None:
                 # New table - create state entry for ALL tables (with or without comments)
                 if bootstrap_config and bootstrap_config.enabled:
+                    logger.info(f"🚀 Processing new table with bootstrap config: {table_key}")
                     await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
                 else:
                     # Track table even if bootstrap is disabled or no comment exists
@@ -889,7 +910,12 @@ class TableSyncManager:
             else:
                 # Existing table - check for changes
                 if comment_hash != current_state.comment_hash:
+                    logger.info(f"🔄 Table comment changed for {table_key}")
                     await self._handle_table_comment_change(current_state, comment_hash, bootstrap_config)
+                elif bootstrap_config and bootstrap_config.enabled and not current_state.bigquery_created:
+                    # Table has bootstrap config but BigQuery table wasn't created (maybe due to previous error)
+                    logger.info(f"🔧 Retrying BigQuery setup for {table_key} (previously failed)")
+                    await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
         
         # Handle tables that no longer exist or lost their comments
         for table_key, state in current_states.items():
@@ -898,17 +924,22 @@ class TableSyncManager:
     
     async def _handle_new_table_with_config(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig):
         """Handle a new table with bootstrap configuration"""
-        logger.info(f"Processing new table {database_name}.{schema_name}.{table_name} with bootstrap config")
+        logger.info(f"🏗️  Processing new table {database_name}.{schema_name}.{table_name} with bootstrap config")
+        logger.info(f"   📊 BigQuery target: {config.bq_table}")
+        logger.info(f"   🔧 Bootstrap enabled: {config.enabled}")
         
         try:
             if not self.bq_manager:
-                logger.error("BigQuery manager not initialized - check BIGQUERY_PROJECT_ID")
+                logger.error("❌ BigQuery manager not initialized - check BIGQUERY_PROJECT_ID")
                 return
         
             dataset_id, table_id = config.bq_table.split('.')
+            logger.info(f"   📂 Dataset: {dataset_id}, Table: {table_id}")
             
             # Create dataset if it doesn't exist
+            logger.info(f"   🔍 Checking if dataset '{dataset_id}' exists...")
             if not self.bq_manager.dataset_exists(dataset_id):
+                logger.info(f"   📁 Creating dataset '{dataset_id}'...")
                 dataset_created = self.bq_manager.create_dataset(dataset_id)
                 if not dataset_created:
                     logger.warning(f"⚠️  Skipping table {database_name}.{schema_name}.{table_name} - cannot create BigQuery dataset")
@@ -925,20 +956,29 @@ class TableSyncManager:
                     )
                     await self.db_manager.upsert_table_state(state)
                     return
+            else:
+                logger.info(f"   ✅ Dataset '{dataset_id}' already exists")
             
             # Check if BigQuery table exists
+            logger.info(f"   🔍 Checking if BigQuery table '{dataset_id}.{table_id}' exists...")
             bq_table_exists = self.bq_manager.table_exists(dataset_id, table_id)
             
             if not bq_table_exists:
+                logger.info(f"   📊 Creating BigQuery table '{dataset_id}.{table_id}'...")
                 # Create BigQuery table and copy data from YugabyteDB
-                columns = await self.db_manager.get_table_columns(schema_name, table_name)
+                columns = await self.db_manager.get_table_columns(database_name, schema_name, table_name)
+                logger.info(f"   📋 Found {len(columns)} columns in source table")
+                
                 self.bq_manager.create_table_from_yugabyte_schema(dataset_id, table_id, columns)
+                logger.info(f"   ✅ BigQuery table '{dataset_id}.{table_id}' created successfully")
                 
                 # Copy existing data
-                await self.copy_yugabyte_data_to_bigquery(schema_name, table_name, config)
+                logger.info(f"   🔄 Copying existing data from YugabyteDB to BigQuery...")
+                data_copy_success = await self.copy_yugabyte_data_to_bigquery(schema_name, table_name, config)
                 
                 # Setup pipeline
-                await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                logger.info(f"   🔗 Setting up Debezium connector for CDC...")
+                pipeline_success = await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
                 
                 # Save state
                 state = TableState(
@@ -948,15 +988,18 @@ class TableSyncManager:
                     comment_hash=comment_hash,
                     bootstrap_config=config,
                     bigquery_created=True,
-                    pipeline_configured=True,
+                    pipeline_configured=pipeline_success,
                     last_updated=datetime.now(timezone.utc)
                 )
+                logger.info(f"   📝 State: BQ=✅, Pipeline={'✅' if pipeline_success else '❌'}, Data={'✅' if data_copy_success else '❌'}")
             else:
+                logger.info(f"   📊 BigQuery table '{dataset_id}.{table_id}' already exists - copying data FROM BigQuery")
                 # BigQuery table exists - copy data from BigQuery to YugabyteDB
-                await self.copy_bigquery_data_to_yugabyte(schema_name, table_name, config)
+                data_copy_success = await self.copy_bigquery_data_to_yugabyte(schema_name, table_name, config)
                 
                 # Setup pipeline
-                await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                logger.info(f"   🔗 Setting up Debezium connector for CDC...")
+                pipeline_success = await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
                 
                 # Save state
                 state = TableState(
@@ -966,12 +1009,13 @@ class TableSyncManager:
                     comment_hash=comment_hash,
                     bootstrap_config=config,
                     bigquery_created=True,
-                    pipeline_configured=True,
+                    pipeline_configured=pipeline_success,
                     last_updated=datetime.now(timezone.utc)
                 )
+                logger.info(f"   📝 State: BQ=✅, Pipeline={'✅' if pipeline_success else '❌'}, Data={'✅' if data_copy_success else '❌'}")
             
             await self.db_manager.upsert_table_state(state)
-            logger.info(f"Successfully processed new table {database_name}.{schema_name}.{table_name}")
+            logger.info(f"🎉 Successfully processed table {database_name}.{schema_name}.{table_name}")
             
         except Exception as e:
             logger.error(f"❌ Failed to process table {database_name}.{schema_name}.{table_name}: {e}")
@@ -1057,6 +1101,15 @@ class TableSyncManager:
             current_states = await self.db_manager.get_current_state()
             
             logger.info(f"Found {len(current_tables)} tables, {len(current_states)} tracked states")
+            
+            # Log tables with comments for debugging
+            tables_with_comments = [t for t in current_tables if t.get('comment')]
+            logger.info(f"📝 Found {len(tables_with_comments)} tables with comments")
+            
+            for table in tables_with_comments:
+                table_key = f"{table['database_name']}.{table['table_schema']}.{table['table_name']}"
+                comment_preview = table['comment'][:100] + "..." if len(table['comment']) > 100 else table['comment']
+                logger.info(f"   💬 {table_key}: {comment_preview}")
             
             # Process changes
             await self.process_table_changes(current_tables, current_states)
