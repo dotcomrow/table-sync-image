@@ -508,6 +508,9 @@ class DatabaseManager:
             bootstrap_config = None
             if row['bootstrap_config']:
                 config_dict = row['bootstrap_config']
+                # Handle case where JSONB data comes back as string instead of dict
+                if isinstance(config_dict, str):
+                    config_dict = json.loads(config_dict)
                 bootstrap_config = TableBootstrapConfig(**config_dict)
             
             states[key] = TableState(
