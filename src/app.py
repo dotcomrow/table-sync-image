@@ -593,18 +593,30 @@ class BigQueryManager:
         except Exception:
             return False
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def create_dataset(self, dataset_id: str):
         """Create a BigQuery dataset"""
-        if self.dataset_exists(dataset_id):
-            logger.info(f"Dataset {dataset_id} already exists")
-            return
-        
-        dataset = bigquery.Dataset(f"{self.project_id}.{dataset_id}")
-        dataset.location = "US"  # Configure as needed
-        
-        dataset = self.client.create_dataset(dataset, timeout=30)
-        logger.info(f"Created dataset {dataset_id}")
+        try:
+            if self.dataset_exists(dataset_id):
+                logger.info(f"Dataset {dataset_id} already exists")
+                return True
+            
+            dataset = bigquery.Dataset(f"{self.project_id}.{dataset_id}")
+            dataset.location = "US"  # Configure as needed
+            
+            dataset = self.client.create_dataset(dataset, timeout=30)
+            logger.info(f"Created dataset {dataset_id}")
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "bigquery.datasets.create" in error_msg or "Access Denied" in error_msg:
+                logger.error(f"❌ BigQuery permission error: Cannot create dataset '{dataset_id}'")
+                logger.error("   Required permission: bigquery.datasets.create")
+                logger.error("   Please ensure the service account has BigQuery Admin or Dataset Creator role")
+                return False
+            else:
+                logger.error(f"❌ Unexpected error creating dataset '{dataset_id}': {e}")
+                raise
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def create_table_from_yugabyte_schema(self, dataset_id: str, table_id: str, columns: List[Dict]):
@@ -884,62 +896,98 @@ class TableSyncManager:
         """Handle a new table with bootstrap configuration"""
         logger.info(f"Processing new table {database_name}.{schema_name}.{table_name} with bootstrap config")
         
-        if not self.bq_manager:
-            logger.error("BigQuery manager not initialized - check BIGQUERY_PROJECT_ID")
-            return
+        try:
+            if not self.bq_manager:
+                logger.error("BigQuery manager not initialized - check BIGQUERY_PROJECT_ID")
+                return
         
-        dataset_id, table_id = config.bq_table.split('.')
-        
-        # Create dataset if it doesn't exist
-        if not self.bq_manager.dataset_exists(dataset_id):
-            self.bq_manager.create_dataset(dataset_id)
-        
-        # Check if BigQuery table exists
-        bq_table_exists = self.bq_manager.table_exists(dataset_id, table_id)
-        
-        if not bq_table_exists:
-            # Create BigQuery table and copy data from YugabyteDB
-            columns = await self.db_manager.get_table_columns(schema_name, table_name)
-            self.bq_manager.create_table_from_yugabyte_schema(dataset_id, table_id, columns)
+            dataset_id, table_id = config.bq_table.split('.')
             
-            # Copy existing data
-            await self.copy_yugabyte_data_to_bigquery(schema_name, table_name, config)
+            # Create dataset if it doesn't exist
+            if not self.bq_manager.dataset_exists(dataset_id):
+                dataset_created = self.bq_manager.create_dataset(dataset_id)
+                if not dataset_created:
+                    logger.warning(f"⚠️  Skipping table {database_name}.{schema_name}.{table_name} - cannot create BigQuery dataset")
+                    # Still create a state record but mark it as not synced
+                    state = TableState(
+                        database_name=database_name,
+                        schema_name=schema_name,
+                        table_name=table_name,
+                        comment_hash=comment_hash,
+                        bootstrap_config=config,
+                        bigquery_created=False,
+                        pipeline_configured=False,
+                        last_updated=datetime.now(timezone.utc)
+                    )
+                    await self.db_manager.upsert_table_state(state)
+                    return
             
-            # Setup pipeline
-            await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+            # Check if BigQuery table exists
+            bq_table_exists = self.bq_manager.table_exists(dataset_id, table_id)
             
-            # Save state
-            state = TableState(
-                database_name=database_name,
-                schema_name=schema_name,
-                table_name=table_name,
-                comment_hash=comment_hash,
-                bootstrap_config=config,
-                bigquery_created=True,
-                pipeline_configured=True,
-                last_updated=datetime.now(timezone.utc)
-            )
-        else:
-            # BigQuery table exists - copy data from BigQuery to YugabyteDB
-            await self.copy_bigquery_data_to_yugabyte(schema_name, table_name, config)
+            if not bq_table_exists:
+                # Create BigQuery table and copy data from YugabyteDB
+                columns = await self.db_manager.get_table_columns(schema_name, table_name)
+                self.bq_manager.create_table_from_yugabyte_schema(dataset_id, table_id, columns)
+                
+                # Copy existing data
+                await self.copy_yugabyte_data_to_bigquery(schema_name, table_name, config)
+                
+                # Setup pipeline
+                await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                
+                # Save state
+                state = TableState(
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    comment_hash=comment_hash,
+                    bootstrap_config=config,
+                    bigquery_created=True,
+                    pipeline_configured=True,
+                    last_updated=datetime.now(timezone.utc)
+                )
+            else:
+                # BigQuery table exists - copy data from BigQuery to YugabyteDB
+                await self.copy_bigquery_data_to_yugabyte(schema_name, table_name, config)
+                
+                # Setup pipeline
+                await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+                
+                # Save state
+                state = TableState(
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    comment_hash=comment_hash,
+                    bootstrap_config=config,
+                    bigquery_created=True,
+                    pipeline_configured=True,
+                    last_updated=datetime.now(timezone.utc)
+                )
             
-            # Setup pipeline
-            await self.pipeline_manager.setup_debezium_connector(schema_name, table_name, config)
+            await self.db_manager.upsert_table_state(state)
+            logger.info(f"Successfully processed new table {database_name}.{schema_name}.{table_name}")
             
-            # Save state
-            state = TableState(
-                database_name=database_name,
-                schema_name=schema_name,
-                table_name=table_name,
-                comment_hash=comment_hash,
-                bootstrap_config=config,
-                bigquery_created=True,
-                pipeline_configured=True,
-                last_updated=datetime.now(timezone.utc)
-            )
-        
-        await self.db_manager.upsert_table_state(state)
-        logger.info(f"Successfully processed new table {database_name}.{schema_name}.{table_name}")
+        except Exception as e:
+            logger.error(f"❌ Failed to process table {database_name}.{schema_name}.{table_name}: {e}")
+            logger.warning(f"⚠️  Creating state record without BigQuery sync for {database_name}.{schema_name}.{table_name}")
+            
+            # Create a state record to track this table but mark it as not synced
+            try:
+                state = TableState(
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    comment_hash=comment_hash,
+                    bootstrap_config=config,
+                    bigquery_created=False,
+                    pipeline_configured=False,
+                    last_updated=datetime.now(timezone.utc)
+                )
+                await self.db_manager.upsert_table_state(state)
+            except Exception as state_error:
+                logger.error(f"❌ Failed to create state record: {state_error}")
     
     async def _create_table_state(self, database_name: str, schema_name: str, table_name: str, comment_hash: Optional[str], config: Optional[TableBootstrapConfig]):
         """Create state record for a table"""
