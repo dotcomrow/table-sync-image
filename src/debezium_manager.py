@@ -13,12 +13,25 @@ class DebeziumConnectorManager:
         self.connector_url = connector_url.rstrip('/')
         self.connectors_endpoint = f"{self.connector_url}/connectors"
         
-        # Get configuration from environment
-        self.db_hostname = os.getenv("DEBEZIUM_DATABASE_HOSTNAME", "localhost")
-        self.db_port = os.getenv("DEBEZIUM_DATABASE_PORT", "5433")
-        self.db_user = os.getenv("DEBEZIUM_DATABASE_USER", "yugabyte")
-        self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", "yugabyte")
-        self.db_name = os.getenv("DEBEZIUM_DATABASE_NAME", "yugabyte")
+        # Parse database configuration from DATABASE_URL environment variable
+        database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+        
+        # Parse the URL to extract connection details
+        import urllib.parse
+        parsed = urllib.parse.urlparse(database_url)
+        
+        self.db_hostname = parsed.hostname or "localhost"
+        self.db_port = str(parsed.port or 5433)
+        self.db_user = parsed.username or "yugabyte"
+        self.db_password = parsed.password or "yugabyte"
+        
+        logger.info(f"Debezium will connect to YugabyteDB at {self.db_hostname}:{self.db_port} as user {self.db_user}")
+        
+        # Allow override via specific environment variables if needed
+        self.db_hostname = os.getenv("DEBEZIUM_DATABASE_HOSTNAME", self.db_hostname)
+        self.db_port = os.getenv("DEBEZIUM_DATABASE_PORT", self.db_port)
+        self.db_user = os.getenv("DEBEZIUM_DATABASE_USER", self.db_user)
+        self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", self.db_password)
     
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
@@ -79,6 +92,7 @@ class DebeziumConnectorManager:
         }
         
         logger.info(f"Creating connector {connector_name} with config:")
+        logger.info(f"  🔌 Connecting to YugabyteDB at {self.db_hostname}:{self.db_port}")
         for key, value in connector_config["config"].items():
             if "password" not in key.lower():
                 logger.info(f"  {key}: {value}")
