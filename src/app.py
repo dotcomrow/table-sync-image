@@ -912,6 +912,14 @@ class TableSyncManager:
             
             current_state = current_states.get(table_key)
             
+            # Debug logging for state analysis
+            if bootstrap_config and bootstrap_config.enabled:
+                if current_state:
+                    logger.info(f"🔍 Existing state for {table_key}: BQ={current_state.bigquery_created}, Pipeline={current_state.pipeline_configured}")
+                    logger.info(f"🔍 Comment hash changed: {comment_hash != current_state.comment_hash}")
+                else:
+                    logger.info(f"🔍 No existing state for {table_key} - treating as new table")
+            
             # Determine what action to take
             if current_state is None:
                 # New table - create state entry for ALL tables (with or without comments)
@@ -930,6 +938,16 @@ class TableSyncManager:
                     # Table has bootstrap config but BigQuery table wasn't created (maybe due to previous error)
                     logger.info(f"🔧 Retrying BigQuery setup for {table_key} (previously failed)")
                     await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
+                elif bootstrap_config and bootstrap_config.enabled:
+                    # Double-check that BigQuery table actually exists
+                    dataset_id, table_id = bootstrap_config.bq_table.split('.')
+                    if self.bq_manager and not self.bq_manager.table_exists(dataset_id, table_id):
+                        logger.info(f"🔧 BigQuery table doesn't actually exist for {table_key} - retrying setup")
+                        await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
+                    else:
+                        logger.info(f"✅ Table {table_key} already properly configured (BQ={current_state.bigquery_created}, Pipeline={current_state.pipeline_configured})")
+                else:
+                    logger.debug(f"🔍 No action needed for {table_key}")
         
         # Handle tables that no longer exist or lost their comments
         for table_key, state in current_states.items():
