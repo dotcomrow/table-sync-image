@@ -38,6 +38,86 @@ class DebeziumConnectorManager:
         self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", self.db_password)
         self.db_master_addresses = os.getenv("DEBEZIUM_MASTER_ADDRESSES", self.db_master_addresses)
     
+    async def cleanup_all_cdc_streams_on_startup(self) -> bool:
+        """Clean up ALL CDC streams across all databases on startup"""
+        logger.info("🧹 Starting cleanup of ALL CDC streams across all databases...")
+        
+        try:
+            import asyncpg
+            
+            # Get the base database URL and discover all databases
+            database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+            base_url = database_url.rsplit('/', 1)[0]
+            
+            # Connect to default database to get list of all databases
+            conn = await asyncpg.connect(database_url)
+            try:
+                # Get all databases except system databases
+                databases = await conn.fetch("""
+                    SELECT datname FROM pg_database 
+                    WHERE datname NOT IN ('template0', 'template1', 'postgres', 'system_platform')
+                    AND datistemplate = false
+                """)
+                
+                total_cleaned = 0
+                for db_record in databases:
+                    db_name = db_record['datname']
+                    cleaned_count = await self._cleanup_database_cdc_streams(base_url, db_name)
+                    total_cleaned += cleaned_count
+                
+                logger.info(f"✅ Startup CDC cleanup completed: {total_cleaned} streams/publications cleaned across {len(databases)} databases")
+                return True
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup CDC streams on startup: {e}")
+            logger.warning("⚠️  Continuing startup despite cleanup failure...")
+            return False
+    
+    async def _cleanup_database_cdc_streams(self, base_url: str, database_name: str) -> int:
+        """Clean up all CDC streams in a specific database"""
+        try:
+            import asyncpg
+            db_url = f"{base_url}/{database_name}"
+            
+            conn = await asyncpg.connect(db_url)
+            try:
+                cleaned_count = 0
+                
+                # 1. Drop all publications
+                publications = await conn.fetch("SELECT pubname FROM pg_publication")
+                for pub in publications:
+                    try:
+                        await conn.execute(f"DROP PUBLICATION IF EXISTS {pub['pubname']} CASCADE")
+                        logger.debug(f"Dropped publication: {pub['pubname']} in {database_name}")
+                        cleaned_count += 1
+                    except Exception as e:
+                        logger.debug(f"Failed to drop publication {pub['pubname']}: {e}")
+                
+                # 2. Drop all replication slots
+                slots = await conn.fetch("SELECT slot_name FROM pg_replication_slots")
+                for slot in slots:
+                    try:
+                        await conn.execute(f"SELECT pg_drop_replication_slot('{slot['slot_name']}')")
+                        logger.debug(f"Dropped replication slot: {slot['slot_name']} in {database_name}")
+                        cleaned_count += 1
+                    except Exception as e:
+                        logger.debug(f"Failed to drop replication slot {slot['slot_name']}: {e}")
+                
+                if cleaned_count > 0:
+                    logger.info(f"🧹 Cleaned {cleaned_count} CDC streams/publications in database '{database_name}'")
+                
+                return cleaned_count
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup CDC streams in database {database_name}: {e}")
+            return 0
+    
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
         

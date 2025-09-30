@@ -26,6 +26,7 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 DEBEZIUM_CONNECTOR_URL = os.getenv("DEBEZIUM_CONNECTOR_URL", "http://localhost:8083")
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
 
 # Configure logging
 logger.remove()
@@ -771,6 +772,17 @@ class TableSyncManager:
         )
         logger.info(f"Pipeline manager configured for Debezium at {DEBEZIUM_CONNECTOR_URL}")
         
+        # Perform startup CDC cleanup if enabled (default: true)
+        if CLEANUP_CDC_ON_STARTUP:
+            logger.info("Performing startup CDC stream cleanup...")
+            cleanup_success = await self.pipeline_manager.connector_manager.cleanup_all_cdc_streams_on_startup()
+            if cleanup_success:
+                logger.info("✅ Startup CDC cleanup completed successfully")
+            else:
+                logger.warning("⚠️  Startup CDC cleanup had issues, but continuing...")
+        else:
+            logger.info("Startup CDC cleanup disabled via CLEANUP_CDC_ON_STARTUP=false")
+        
         # Initialize BigQuery components if configured
         if self.bq_manager:
             logger.info("Initializing BigQuery integration...")
@@ -1328,6 +1340,7 @@ async def main():
     logger.info(f"  Debezium URL: {DEBEZIUM_CONNECTOR_URL}")
     logger.info(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s")
     logger.info(f"  Log Level: {LOG_LEVEL}")
+    logger.info(f"  CDC Cleanup on Startup: {CLEANUP_CDC_ON_STARTUP}")
     
     # Validate required environment variables
     if not BIGQUERY_PROJECT_ID:
