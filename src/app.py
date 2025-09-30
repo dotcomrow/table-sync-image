@@ -882,7 +882,7 @@ class TableSyncManager:
             return False
     
     async def process_table_changes(self, current_tables: List[Dict], current_states: Dict[str, TableState]):
-        """Process changes in table configurations"""
+        """Process changes in table configurations - ALWAYS verify actual state regardless of stored state"""
         
         # Track which tables we've seen in this scan
         seen_tables = set()
@@ -912,53 +912,80 @@ class TableSyncManager:
             
             current_state = current_states.get(table_key)
             
-            # Debug logging for state analysis
+            # ALWAYS verify actual state if bootstrap is enabled, regardless of stored state
             if bootstrap_config and bootstrap_config.enabled:
+                logger.info(f"🔍 Bootstrap enabled for {table_key} - verifying actual resource state...")
+                
+                # Check actual BigQuery table existence
+                dataset_id, table_id = bootstrap_config.bq_table.split('.')
+                actual_bq_exists = False
+                actual_pipeline_exists = False
+                
+                if self.bq_manager:
+                    actual_bq_exists = self.bq_manager.table_exists(dataset_id, table_id)
+                    logger.info(f"   � BigQuery table {dataset_id}.{table_id} actually exists: {actual_bq_exists}")
+                
+                # Check actual Debezium connector existence
+                if self.pipeline_manager:
+                    try:
+                        actual_pipeline_exists = await self.pipeline_manager.connector_manager.connector_exists_for_table(database_name, schema_name, table_name)
+                        logger.info(f"   � Debezium connector actually exists: {actual_pipeline_exists}")
+                    except Exception as e:
+                        logger.warning(f"   ⚠️  Could not check Debezium connector status: {e}")
+                        actual_pipeline_exists = False
+                
+                # Compare stored state vs actual state
                 if current_state:
-                    logger.info(f"🔍 Existing state for {table_key}: BQ={current_state.bigquery_created}, Pipeline={current_state.pipeline_configured}")
-                    logger.info(f"🔍 Comment hash changed: {comment_hash != current_state.comment_hash}")
+                    stored_bq = current_state.bigquery_created
+                    stored_pipeline = current_state.pipeline_configured
+                    stored_hash = current_state.comment_hash
+                    
+                    logger.info(f"   � Stored state: BQ={stored_bq}, Pipeline={stored_pipeline}")
+                    logger.info(f"   🔍 Actual state: BQ={actual_bq_exists}, Pipeline={actual_pipeline_exists}")
+                    logger.info(f"   📝 Comment changed: {comment_hash != stored_hash}")
+                    
+                    # Determine if we need to take action
+                    needs_bq_setup = not actual_bq_exists
+                    needs_pipeline_setup = not actual_pipeline_exists
+                    comment_changed = comment_hash != stored_hash
+                    
+                    if needs_bq_setup or needs_pipeline_setup or comment_changed:
+                        logger.info(f"� Action needed for {table_key}: BQ_setup={needs_bq_setup}, Pipeline_setup={needs_pipeline_setup}, Comment_changed={comment_changed}")
+                        await self._handle_table_with_config_full_check(database_name, schema_name, table_name, comment_hash, bootstrap_config, actual_bq_exists, actual_pipeline_exists)
+                    else:
+                        logger.info(f"✅ Table {table_key} verified - all resources exist and are current")
+                        # Update state to ensure it's accurate
+                        await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, bootstrap_config, True, True)
                 else:
-                    logger.info(f"🔍 No existing state for {table_key} - treating as new table")
-            
-            # Determine what action to take
-            if current_state is None:
-                # New table - create state entry for ALL tables (with or without comments)
-                if bootstrap_config and bootstrap_config.enabled:
-                    logger.info(f"🚀 Processing new table with bootstrap config: {table_key}")
-                    await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
-                else:
+                    # No stored state - treat as new table but check what actually exists
+                    logger.info(f"� New table {table_key} with bootstrap config - checking existing resources")
+                    await self._handle_table_with_config_full_check(database_name, schema_name, table_name, comment_hash, bootstrap_config, actual_bq_exists, actual_pipeline_exists)
+            else:
+                # No bootstrap config or disabled
+                if current_state is None:
                     # Track table even if bootstrap is disabled or no comment exists
                     await self._create_table_state(database_name, schema_name, table_name, comment_hash, bootstrap_config)
-            else:
-                # Existing table - check for changes
-                if comment_hash != current_state.comment_hash:
-                    logger.info(f"🔄 Table comment changed for {table_key}")
-                    await self._handle_table_comment_change(current_state, comment_hash, bootstrap_config)
-                elif bootstrap_config and bootstrap_config.enabled and not current_state.bigquery_created:
-                    # Table has bootstrap config but BigQuery table wasn't created (maybe due to previous error)
-                    logger.info(f"🔧 Retrying BigQuery setup for {table_key} (previously failed)")
-                    await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
-                elif bootstrap_config and bootstrap_config.enabled:
-                    # Double-check that BigQuery table actually exists
-                    dataset_id, table_id = bootstrap_config.bq_table.split('.')
-                    if self.bq_manager and not self.bq_manager.table_exists(dataset_id, table_id):
-                        logger.info(f"🔧 BigQuery table doesn't actually exist for {table_key} - retrying setup")
-                        await self._handle_new_table_with_config(database_name, schema_name, table_name, comment_hash, bootstrap_config)
-                    else:
-                        logger.info(f"✅ Table {table_key} already properly configured (BQ={current_state.bigquery_created}, Pipeline={current_state.pipeline_configured})")
                 else:
-                    logger.debug(f"🔍 No action needed for {table_key}")
+                    # Check if bootstrap was disabled (had config before, now doesn't)
+                    if current_state.bootstrap_config and current_state.bootstrap_config.enabled:
+                        logger.info(f"� Bootstrap disabled for {table_key} - cleaning up resources")
+                        await self._handle_table_removal(current_state)
+                    else:
+                        # Just update the state for non-bootstrap tables
+                        await self._update_table_state_simple(database_name, schema_name, table_name, comment_hash, bootstrap_config)
         
         # Handle tables that no longer exist or lost their comments
         for table_key, state in current_states.items():
             if table_key not in seen_tables:
+                logger.info(f"🗑️  Table {table_key} no longer exists - cleaning up")
                 await self._handle_table_removal(state)
     
-    async def _handle_new_table_with_config(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig):
-        """Handle a new table with bootstrap configuration"""
-        logger.info(f"🏗️  Processing new table {database_name}.{schema_name}.{table_name} with bootstrap config")
-        logger.info(f"   📊 BigQuery target: {config.bq_table}")
-        logger.info(f"   🔧 Bootstrap enabled: {config.enabled}")
+    
+    async def _handle_table_with_config_full_check(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig, actual_bq_exists: bool, actual_pipeline_exists: bool):
+        """Handle table with bootstrap config - perform full verification and setup as needed"""
+        logger.info(f"🔧 Full setup check for {database_name}.{schema_name}.{table_name}")
+        logger.info(f"   📊 BigQuery exists: {actual_bq_exists}")
+        logger.info(f"   🔗 Pipeline exists: {actual_pipeline_exists}")
         
         try:
             if not self.bq_manager:
@@ -966,109 +993,97 @@ class TableSyncManager:
                 return
         
             dataset_id, table_id = config.bq_table.split('.')
-            logger.info(f"   📂 Dataset: {dataset_id}, Table: {table_id}")
             
-            # Create dataset if it doesn't exist
-            logger.info(f"   🔍 Checking if dataset '{dataset_id}' exists...")
+            # Step 1: Ensure dataset exists
+            logger.info(f"   🔍 Checking dataset '{dataset_id}'...")
             if not self.bq_manager.dataset_exists(dataset_id):
                 logger.info(f"   📁 Creating dataset '{dataset_id}'...")
                 dataset_created = self.bq_manager.create_dataset(dataset_id)
                 if not dataset_created:
-                    logger.warning(f"⚠️  Skipping table {database_name}.{schema_name}.{table_name} - cannot create BigQuery dataset")
-                    # Still create a state record but mark it as not synced
-                    state = TableState(
-                        database_name=database_name,
-                        schema_name=schema_name,
-                        table_name=table_name,
-                        comment_hash=comment_hash,
-                        bootstrap_config=config,
-                        bigquery_created=False,
-                        pipeline_configured=False,
-                        last_updated=datetime.now(timezone.utc)
-                    )
-                    await self.db_manager.upsert_table_state(state)
+                    logger.error(f"❌ Cannot create BigQuery dataset '{dataset_id}'")
+                    await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, False, False)
                     return
-            else:
-                logger.info(f"   ✅ Dataset '{dataset_id}' already exists")
             
-            # Check if BigQuery table exists
-            logger.info(f"   🔍 Checking if BigQuery table '{dataset_id}.{table_id}' exists...")
-            bq_table_exists = self.bq_manager.table_exists(dataset_id, table_id)
-            
-            if not bq_table_exists:
+            # Step 2: Handle BigQuery table
+            bq_success = actual_bq_exists
+            if not actual_bq_exists:
                 logger.info(f"   📊 Creating BigQuery table '{dataset_id}.{table_id}'...")
-                # Create BigQuery table and copy data from YugabyteDB
-                columns = await self.db_manager.get_table_columns(database_name, schema_name, table_name)
-                logger.info(f"   📋 Found {len(columns)} columns in source table")
-                
-                self.bq_manager.create_table_from_yugabyte_schema(dataset_id, table_id, columns)
-                logger.info(f"   ✅ BigQuery table '{dataset_id}.{table_id}' created successfully")
-                
-                # Copy existing data
-                logger.info(f"   🔄 Copying existing data from YugabyteDB to BigQuery...")
-                data_copy_success = await self.copy_yugabyte_data_to_bigquery(database_name, schema_name, table_name, config)
-                
-                # Setup pipeline
-                logger.info(f"   🔗 Setting up Debezium connector for CDC...")
-                pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
-                
-                # Save state
-                state = TableState(
-                    database_name=database_name,
-                    schema_name=schema_name,
-                    table_name=table_name,
-                    comment_hash=comment_hash,
-                    bootstrap_config=config,
-                    bigquery_created=True,
-                    pipeline_configured=pipeline_success,
-                    last_updated=datetime.now(timezone.utc)
-                )
-                logger.info(f"   📝 State: BQ=✅, Pipeline={'✅' if pipeline_success else '❌'}, Data={'✅' if data_copy_success else '❌'}")
+                try:
+                    columns = await self.db_manager.get_table_columns(database_name, schema_name, table_name)
+                    self.bq_manager.create_table_from_yugabyte_schema(dataset_id, table_id, columns)
+                    bq_success = True
+                    logger.info(f"   ✅ BigQuery table created successfully")
+                    
+                    # Copy data from YugabyteDB to BigQuery
+                    logger.info(f"   🔄 Copying data from YugabyteDB to BigQuery...")
+                    await self.copy_yugabyte_data_to_bigquery(database_name, schema_name, table_name, config)
+                except Exception as e:
+                    logger.error(f"   ❌ Failed to create BigQuery table: {e}")
+                    bq_success = False
             else:
-                logger.info(f"   📊 BigQuery table '{dataset_id}.{table_id}' already exists - copying data FROM BigQuery")
-                # BigQuery table exists - copy data from BigQuery to YugabyteDB
-                data_copy_success = await self.copy_bigquery_data_to_yugabyte(database_name, schema_name, table_name, config)
-                
-                # Setup pipeline
-                logger.info(f"   🔗 Setting up Debezium connector for CDC...")
-                pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
-                
-                # Save state
-                state = TableState(
-                    database_name=database_name,
-                    schema_name=schema_name,
-                    table_name=table_name,
-                    comment_hash=comment_hash,
-                    bootstrap_config=config,
-                    bigquery_created=True,
-                    pipeline_configured=pipeline_success,
-                    last_updated=datetime.now(timezone.utc)
-                )
-                logger.info(f"   📝 State: BQ=✅, Pipeline={'✅' if pipeline_success else '❌'}, Data={'✅' if data_copy_success else '❌'}")
+                logger.info(f"   📊 BigQuery table already exists - ensuring data sync...")
+                # Table exists, copy data FROM BigQuery to YugabyteDB to ensure sync
+                try:
+                    await self.copy_bigquery_data_to_yugabyte(database_name, schema_name, table_name, config)
+                    logger.info(f"   ✅ Data synced from BigQuery to YugabyteDB")
+                except Exception as e:
+                    logger.warning(f"   ⚠️  Data sync failed: {e}")
             
-            await self.db_manager.upsert_table_state(state)
-            logger.info(f"🎉 Successfully processed table {database_name}.{schema_name}.{table_name}")
+            # Step 3: Handle pipeline
+            pipeline_success = actual_pipeline_exists
+            if not actual_pipeline_exists:
+                logger.info(f"   🔗 Setting up Debezium connector...")
+                try:
+                    pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
+                    if pipeline_success:
+                        logger.info(f"   ✅ Debezium connector created successfully")
+                    else:
+                        logger.error(f"   ❌ Failed to create Debezium connector")
+                except Exception as e:
+                    logger.error(f"   ❌ Error setting up Debezium connector: {e}")
+                    pipeline_success = False
+            else:
+                logger.info(f"   🔗 Debezium connector already exists")
+            
+            # Step 4: Update state with verified information
+            await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, bq_success, pipeline_success)
+            
+            status = "✅ SUCCESS" if (bq_success and pipeline_success) else "⚠️  PARTIAL"
+            logger.info(f"🎯 {status}: {database_name}.{schema_name}.{table_name} - BQ={bq_success}, Pipeline={pipeline_success}")
             
         except Exception as e:
-            logger.error(f"❌ Failed to process table {database_name}.{schema_name}.{table_name}: {e}")
-            logger.warning(f"⚠️  Creating state record without BigQuery sync for {database_name}.{schema_name}.{table_name}")
-            
-            # Create a state record to track this table but mark it as not synced
-            try:
-                state = TableState(
-                    database_name=database_name,
-                    schema_name=schema_name,
-                    table_name=table_name,
-                    comment_hash=comment_hash,
-                    bootstrap_config=config,
-                    bigquery_created=False,
-                    pipeline_configured=False,
-                    last_updated=datetime.now(timezone.utc)
-                )
-                await self.db_manager.upsert_table_state(state)
-            except Exception as state_error:
-                logger.error(f"❌ Failed to create state record: {state_error}")
-    
+            logger.error(f"❌ Error in full setup check for {database_name}.{schema_name}.{table_name}: {e}")
+            await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, False, False)
+
+    async def _update_table_state_verified(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig, bq_created: bool, pipeline_configured: bool):
+        """Update table state with verified actual state"""
+        state = TableState(
+            database_name=database_name,
+            schema_name=schema_name,
+            table_name=table_name,
+            comment_hash=comment_hash,
+            bootstrap_config=config,
+            bigquery_created=bq_created,
+            pipeline_configured=pipeline_configured,
+            last_updated=datetime.now(timezone.utc)
+        )
+        await self.db_manager.upsert_table_state(state)
+        logger.debug(f"📝 Updated verified state for {database_name}.{schema_name}.{table_name}: BQ={bq_created}, Pipeline={pipeline_configured}")
+
+    async def _update_table_state_simple(self, database_name: str, schema_name: str, table_name: str, comment_hash: Optional[str], config: Optional[TableBootstrapConfig]):
+        """Update state for non-bootstrap tables"""
+        state = TableState(
+            database_name=database_name,
+            schema_name=schema_name,
+            table_name=table_name,
+            comment_hash=comment_hash,
+            bootstrap_config=config,
+            bigquery_created=False,
+            pipeline_configured=False,
+            last_updated=datetime.now(timezone.utc)
+        )
+        await self.db_manager.upsert_table_state(state)
+
     async def _create_table_state(self, database_name: str, schema_name: str, table_name: str, comment_hash: Optional[str], config: Optional[TableBootstrapConfig]):
         """Create state record for a table"""
         state = TableState(
@@ -1085,6 +1100,7 @@ class TableSyncManager:
     
     async def _handle_table_comment_change(self, current_state: TableState, new_comment_hash: Optional[str], new_config: Optional[TableBootstrapConfig]):
         """Handle changes to table comments"""
+        database_name = current_state.database_name
         schema_name = current_state.schema_name
         table_name = current_state.table_name
         
@@ -1092,8 +1108,24 @@ class TableSyncManager:
             # Comment was removed
             await self._handle_table_removal(current_state)
         elif new_config and new_config.enabled and not current_state.bootstrap_config:
-            # Bootstrap was enabled
-            await self._handle_new_table_with_config(schema_name, table_name, new_comment_hash, new_config)
+            # Bootstrap was enabled - do full verification
+            logger.info(f"🔄 Bootstrap enabled for existing table {database_name}.{schema_name}.{table_name}")
+            
+            # Check what actually exists
+            dataset_id, table_id = new_config.bq_table.split('.')
+            actual_bq_exists = False
+            actual_pipeline_exists = False
+            
+            if self.bq_manager:
+                actual_bq_exists = self.bq_manager.table_exists(dataset_id, table_id)
+            
+            if self.pipeline_manager:
+                try:
+                    actual_pipeline_exists = await self.pipeline_manager.connector_manager.connector_exists_for_table(database_name, schema_name, table_name)
+                except Exception:
+                    actual_pipeline_exists = False
+            
+            await self._handle_table_with_config_full_check(database_name, schema_name, table_name, new_comment_hash, new_config, actual_bq_exists, actual_pipeline_exists)
         elif not new_config or not new_config.enabled:
             # Bootstrap was disabled or config is invalid
             if current_state.bootstrap_config and current_state.bootstrap_config.enabled:

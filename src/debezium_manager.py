@@ -19,10 +19,10 @@ class DebeziumConnectorManager:
         self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", "yugabyte")
         self.db_name = os.getenv("DEBEZIUM_DATABASE_NAME", "yugabyte")
     
-    async def create_connector(self, schema_name: str, table_name: str, bq_table: str) -> bool:
+    async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
         
-        connector_name = f"yugabyte-{schema_name}-{table_name}"
+        connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
         
         # Check if connector already exists
         if await self.connector_exists(connector_name):
@@ -38,12 +38,12 @@ class DebeziumConnectorManager:
                 "database.port": self.db_port,
                 "database.user": self.db_user,
                 "database.password": self.db_password,
-                "database.dbname": self.db_name,
-                "database.server.name": f"yugabyte-{schema_name}",
+                "database.dbname": database_name,
+                "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
                 "plugin.name": "pgoutput",
-                "slot.name": f"debezium_{schema_name}_{table_name}",
-                "publication.name": f"dbz_publication_{schema_name}_{table_name}",
+                "slot.name": f"debezium_{database_name}_{schema_name}_{table_name}",
+                "publication.name": f"dbz_publication_{database_name}_{schema_name}_{table_name}",
                 
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -54,7 +54,7 @@ class DebeziumConnectorManager:
                 # Topic routing
                 "transforms": "route",
                 "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
-                "transforms.route.regex": f"yugabyte-{schema_name}\.{schema_name}\.{table_name}",
+                "transforms.route.regex": f"yugabyte-{database_name}-{schema_name}\.{schema_name}\.{table_name}",
                 "transforms.route.replacement": f"bigquery-{bq_table.replace('.', '-')}",
                 
                 # Snapshot configuration
@@ -87,10 +87,10 @@ class DebeziumConnectorManager:
             logger.error(f"Error creating Debezium connector {connector_name}: {e}")
             return False
     
-    async def delete_connector(self, schema_name: str, table_name: str) -> bool:
+    async def delete_connector(self, database_name: str, schema_name: str, table_name: str) -> bool:
         """Delete a Debezium connector"""
         
-        connector_name = f"yugabyte-{schema_name}-{table_name}"
+        connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -121,6 +121,11 @@ class DebeziumConnectorManager:
         except Exception as e:
             logger.error(f"Error checking connector existence {connector_name}: {e}")
             return False
+    
+    async def connector_exists_for_table(self, database_name: str, schema_name: str, table_name: str) -> bool:
+        """Check if a connector exists for a specific database/schema/table"""
+        connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
+        return await self.connector_exists(connector_name)
     
     async def get_connector_status(self, connector_name: str) -> Optional[Dict]:
         """Get connector status"""
@@ -212,13 +217,19 @@ class YugabytePublicationManager:
     def __init__(self, db_pool):
         self.db_pool = db_pool
     
-    async def create_publication_for_table(self, schema_name: str, table_name: str) -> bool:
+    async def create_publication_for_table(self, database_name: str, schema_name: str, table_name: str) -> bool:
         """Create a publication for a specific table"""
         
-        publication_name = f"dbz_publication_{schema_name}_{table_name}"
+        publication_name = f"dbz_publication_{database_name}_{schema_name}_{table_name}"
+        
+        # Need to connect to the specific database
+        import asyncpg
+        database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+        db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
         
         try:
-            async with self.db_pool.acquire() as conn:
+            conn = await asyncpg.connect(db_url)
+            try:
                 # Check if publication exists
                 check_query = """
                 SELECT 1 FROM pg_publication WHERE pubname = $1
@@ -235,20 +246,28 @@ class YugabytePublicationManager:
                 """
                 await conn.execute(create_query)
                 
-                logger.info(f"Created publication {publication_name} for {schema_name}.{table_name}")
+                logger.info(f"Created publication {publication_name} for {database_name}.{schema_name}.{table_name}")
                 return True
+            finally:
+                await conn.close()
                 
         except Exception as e:
-            logger.error(f"Error creating publication for {schema_name}.{table_name}: {e}")
+            logger.error(f"Error creating publication for {database_name}.{schema_name}.{table_name}: {e}")
             return False
     
-    async def drop_publication_for_table(self, schema_name: str, table_name: str) -> bool:
+    async def drop_publication_for_table(self, database_name: str, schema_name: str, table_name: str) -> bool:
         """Drop a publication for a specific table"""
         
-        publication_name = f"dbz_publication_{schema_name}_{table_name}"
+        publication_name = f"dbz_publication_{database_name}_{schema_name}_{table_name}"
+        
+        # Need to connect to the specific database
+        import asyncpg
+        database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+        db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
         
         try:
-            async with self.db_pool.acquire() as conn:
+            conn = await asyncpg.connect(db_url)
+            try:
                 # Check if publication exists
                 check_query = """
                 SELECT 1 FROM pg_publication WHERE pubname = $1
@@ -263,9 +282,11 @@ class YugabytePublicationManager:
                 drop_query = f"DROP PUBLICATION IF EXISTS {publication_name}"
                 await conn.execute(drop_query)
                 
-                logger.info(f"Dropped publication {publication_name}")
+                logger.info(f"Dropped publication {publication_name} from {database_name}")
                 return True
+            finally:
+                await conn.close()
                 
         except Exception as e:
-            logger.error(f"Error dropping publication for {schema_name}.{table_name}: {e}")
+            logger.error(f"Error dropping publication for {database_name}.{schema_name}.{table_name}: {e}")
             return False
