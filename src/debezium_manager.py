@@ -1,6 +1,7 @@
 """
 Debezium connector management utilities
 """
+import asyncio
 import json
 import aiohttp
 from typing import Dict, Optional
@@ -29,10 +30,18 @@ class DebeziumConnectorManager:
             logger.info(f"Connector {connector_name} already exists")
             return True
         
-        # Check if CDC stream already exists in YugabyteDB
+        # AUTOMATIC CLEANUP: Try to clean up any stale CDC streams before creating connector
+        logger.info(f"Performing automatic CDC stream cleanup before creating connector...")
+        cleanup_success = await self.cleanup_stale_cdc_stream(database_name, schema_name, table_name)
+        if cleanup_success:
+            logger.info(f"Automatic CDC stream cleanup completed successfully")
+        else:
+            logger.warning(f"Automatic CDC stream cleanup had issues, but proceeding with connector creation")
+        
+        # Check if CDC stream already exists in YugabyteDB (after cleanup)
         cdc_exists = await self.check_cdc_stream_exists(database_name, schema_name, table_name)
         if cdc_exists:
-            logger.info(f"CDC stream already exists for {database_name}.{schema_name}.{table_name} - creating connector to use existing stream")
+            logger.info(f"CDC stream still exists after cleanup for {database_name}.{schema_name}.{table_name} - creating connector to use existing stream")
             # When CDC stream exists, use a different snapshot mode
             logger.info(f"Using 'never' snapshot mode since CDC stream already exists")
         
@@ -74,37 +83,63 @@ class DebeziumConnectorManager:
             if "password" not in key.lower():
                 logger.info(f"  {key}: {value}")
         
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.connectors_endpoint,
-                    json=connector_config,
-                    headers={"Content-Type": "application/json"}
-                ) as response:
-                    response_text = await response.text()
+        # RETRY LOGIC: Try up to 3 times with cleanup between attempts
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    wait_time = attempt * 10  # 10, 20 seconds backoff
+                    logger.info(f"Retrying connector creation (attempt {attempt + 1}/{max_retries}) after {wait_time}s delay...")
+                    await asyncio.sleep(wait_time)
                     
-                    if response.status == 201:
-                        logger.info(f"Successfully created Debezium connector: {connector_name}")
-                        return True
-                    else:
-                        logger.error(f"Failed to create connector {connector_name}: {response.status}")
-                        logger.error(f"Response body: {response_text}")
+                    # Additional cleanup before retry
+                    logger.info(f"Performing additional CDC cleanup before retry {attempt + 1}")
+                    await self.cleanup_stale_cdc_stream(database_name, schema_name, table_name)
+                
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:  # Increased timeout
+                    async with session.post(
+                        self.connectors_endpoint,
+                        json=connector_config,
+                        headers={"Content-Type": "application/json"}
+                    ) as response:
+                        response_text = await response.text()
                         
-                        # Try to parse error details
-                        try:
-                            import json
-                            error_data = json.loads(response_text)
-                            if "message" in error_data:
-                                logger.error(f"Error details: {error_data['message']}")
-                        except:
-                            pass
-                        
-                        return False
-                        
-        except Exception as e:
-            logger.error(f"Error creating Debezium connector {connector_name}: {e}")
-            logger.error(f"Connector config was: {connector_config}")
-            return False
+                        if response.status == 201:
+                            logger.info(f"Successfully created Debezium connector: {connector_name} (attempt {attempt + 1})")
+                            return True
+                        else:
+                            logger.error(f"Failed to create connector {connector_name} (attempt {attempt + 1}): {response.status}")
+                            logger.error(f"Response body: {response_text}")
+                            
+                            # Try to parse error details
+                            try:
+                                error_data = json.loads(response_text)
+                                if "message" in error_data:
+                                    logger.error(f"Error details: {error_data['message']}")
+                                    
+                                    # Handle specific error cases
+                                    message = error_data['message'].lower()
+                                    if "timeout" in message:
+                                        if attempt < max_retries - 1:
+                                            logger.warning(f"Connector creation timed out - will retry after cleanup")
+                                        else:
+                                            logger.error(f"Connector creation failed after {max_retries} attempts - this indicates a persistent CDC stream conflict")
+                                            logger.error(f"This may require YugabyteDB-level CDC stream cleanup")
+                                        
+                            except:
+                                pass
+                            
+                            # If this is the last attempt, return False
+                            if attempt == max_retries - 1:
+                                return False
+                                
+            except Exception as e:
+                logger.error(f"Exception during connector creation attempt {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    return False
+        
+        # If we reach here without success, return False
+        return False
     
     async def delete_connector(self, database_name: str, schema_name: str, table_name: str) -> bool:
         """Delete a Debezium connector"""
@@ -146,6 +181,66 @@ class DebeziumConnectorManager:
         connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
         return await self.connector_exists(connector_name)
     
+    async def cleanup_stale_cdc_stream(self, database_name: str, schema_name: str, table_name: str) -> bool:
+        """Attempt to clean up stale CDC streams that might be causing conflicts"""
+        import asyncpg
+        database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
+        db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
+        
+        stream_id = f"{database_name}_{schema_name}_{table_name}_stream"
+        logger.info(f"Attempting to clean up potential stale CDC stream: {stream_id}")
+        
+        try:
+            conn = await asyncpg.connect(db_url)
+            try:
+                # Drop any existing publications that might be related
+                try:
+                    await conn.execute(f"DROP PUBLICATION IF EXISTS {stream_id}")
+                    logger.info(f"Dropped publication {stream_id} if it existed")
+                except Exception as e:
+                    logger.debug(f"Failed to drop publication {stream_id}: {e}")
+                
+                # Try alternative publication names
+                alt_names = [
+                    f"yugabyte_{database_name}_{schema_name}_{table_name}",
+                    f"debezium_{database_name}_{schema_name}_{table_name}",
+                    f"{schema_name}_{table_name}_pub"
+                ]
+                
+                for alt_name in alt_names:
+                    try:
+                        await conn.execute(f"DROP PUBLICATION IF EXISTS {alt_name}")
+                        logger.debug(f"Dropped alternative publication {alt_name} if it existed")
+                    except Exception as e:
+                        logger.debug(f"Failed to drop alternative publication {alt_name}: {e}")
+                
+                # Try to force cleanup any replication slots with similar names
+                try:
+                    slots_to_drop = await conn.fetch("""
+                        SELECT slot_name FROM pg_replication_slots 
+                        WHERE slot_name LIKE $1 OR slot_name LIKE $2 OR slot_name LIKE $3
+                    """, f"%{table_name}%", f"%{stream_id}%", f"%{schema_name}%")
+                    
+                    for slot in slots_to_drop:
+                        try:
+                            await conn.execute(f"SELECT pg_drop_replication_slot('{slot['slot_name']}')")
+                            logger.info(f"Dropped replication slot: {slot['slot_name']}")
+                        except Exception as e:
+                            logger.debug(f"Failed to drop replication slot {slot['slot_name']}: {e}")
+                            
+                except Exception as e:
+                    logger.debug(f"Failed to query/drop replication slots: {e}")
+                
+                logger.info(f"CDC stream cleanup completed for {stream_id}")
+                return True
+                    
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.warning(f"Could not attempt CDC stream cleanup for {database_name}.{schema_name}.{table_name}: {e}")
+            return False
+
     async def check_cdc_stream_exists(self, database_name: str, schema_name: str, table_name: str) -> bool:
         """Check if a CDC stream already exists for the table in YugabyteDB"""
         import asyncpg
