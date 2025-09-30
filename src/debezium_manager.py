@@ -42,6 +42,14 @@ class DebeziumConnectorManager:
         """Clean up ALL CDC streams across all databases on startup"""
         logger.info("🧹 Starting cleanup of ALL CDC streams across all databases...")
         
+        # First, clean up any yb-admin streams that might cause conflicts
+        logger.info("🔧 Cleaning up yb-admin CDC streams first...")
+        yb_admin_cleanup = await self._cleanup_all_yb_admin_streams()
+        if yb_admin_cleanup:
+            logger.info("✅ YB-admin stream cleanup completed")
+        else:
+            logger.warning("⚠️ YB-admin stream cleanup had issues, continuing with PostgreSQL cleanup...")
+        
         try:
             import asyncpg
             
@@ -150,6 +158,241 @@ class DebeziumConnectorManager:
         except Exception as e:
             logger.error(f"Failed to cleanup CDC streams in database {database_name}: {e}")
             return 0
+    
+    async def _cleanup_yb_admin_streams(self, database_name: str) -> bool:
+        """Clean up yb-admin CDC streams that are causing conflicts"""
+        try:
+            import subprocess
+            import json
+            
+            logger.info(f"🧹 Attempting automated yb-admin CDC stream cleanup for database: {database_name}")
+            
+            # First, list all CDC streams to see what we're dealing with
+            list_cmd = [
+                "yb-admin", 
+                "--master_addresses", self.db_master_addresses,
+                "list_cdc_streams"
+            ]
+            
+            logger.info(f"Listing CDC streams: {' '.join(list_cmd)}")
+            
+            try:
+                result = subprocess.run(
+                    list_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"📋 Current CDC streams:")
+                    logger.info(result.stdout)
+                    
+                    # Parse the output to find streams related to our database
+                    streams_to_delete = []
+                    lines = result.stdout.strip().split('\n')
+                    
+                    for line in lines:
+                        # Look for lines that contain database name or stream IDs
+                        if database_name.lower() in line.lower() or 'stream_id' in line.lower():
+                            # Extract stream ID if present
+                            if 'stream_id' in line.lower():
+                                # Parse stream ID from output like: "Stream ID: abc123..."
+                                parts = line.split()
+                                for i, part in enumerate(parts):
+                                    if 'stream_id' in part.lower() and i + 1 < len(parts):
+                                        stream_id = parts[i + 1].strip(':')
+                                        streams_to_delete.append(stream_id)
+                                        logger.info(f"🎯 Found stream to delete: {stream_id}")
+                    
+                    # Delete each conflicting stream
+                    deletion_success = True
+                    for stream_id in streams_to_delete:
+                        delete_cmd = [
+                            "yb-admin",
+                            "--master_addresses", self.db_master_addresses,
+                            "delete_cdc_stream", stream_id
+                        ]
+                        
+                        logger.info(f"Deleting CDC stream: {' '.join(delete_cmd)}")
+                        
+                        try:
+                            delete_result = subprocess.run(
+                                delete_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            
+                            if delete_result.returncode == 0:
+                                logger.info(f"✅ Successfully deleted CDC stream: {stream_id}")
+                            else:
+                                logger.error(f"❌ Failed to delete CDC stream {stream_id}: {delete_result.stderr}")
+                                deletion_success = False
+                                
+                        except subprocess.TimeoutExpired:
+                            logger.error(f"⏰ Timeout deleting CDC stream: {stream_id}")
+                            deletion_success = False
+                        except Exception as e:
+                            logger.error(f"❌ Exception deleting CDC stream {stream_id}: {e}")
+                            deletion_success = False
+                    
+                    if len(streams_to_delete) == 0:
+                        logger.warning(f"🤔 No streams found matching database '{database_name}' - may need manual inspection")
+                        # Try a more aggressive approach - delete ALL streams
+                        logger.info(f"Attempting to delete ALL CDC streams as last resort...")
+                        
+                        # Parse all stream IDs from the output
+                        all_streams = []
+                        for line in lines:
+                            if 'stream_id' in line.lower():
+                                parts = line.split()
+                                for i, part in enumerate(parts):
+                                    if 'stream_id' in part.lower() and i + 1 < len(parts):
+                                        stream_id = parts[i + 1].strip(':')
+                                        all_streams.append(stream_id)
+                        
+                        # Delete all streams
+                        for stream_id in all_streams:
+                            delete_cmd = [
+                                "yb-admin",
+                                "--master_addresses", self.db_master_addresses,
+                                "delete_cdc_stream", stream_id
+                            ]
+                            
+                            try:
+                                delete_result = subprocess.run(
+                                    delete_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30
+                                )
+                                
+                                if delete_result.returncode == 0:
+                                    logger.info(f"✅ Deleted CDC stream: {stream_id}")
+                                else:
+                                    logger.warning(f"⚠️ Could not delete stream {stream_id}: {delete_result.stderr}")
+                                    
+                            except Exception as e:
+                                logger.warning(f"⚠️ Exception deleting stream {stream_id}: {e}")
+                    
+                    return deletion_success
+                    
+                else:
+                    logger.error(f"❌ Failed to list CDC streams: {result.stderr}")
+                    return False
+                    
+            except subprocess.TimeoutExpired:
+                logger.error(f"⏰ Timeout listing CDC streams")
+                return False
+            except FileNotFoundError:
+                logger.error(f"❌ yb-admin command not found - cannot perform automated cleanup")
+                logger.error(f"Manual cleanup required using yb-admin tool")
+                return False
+            except Exception as e:
+                logger.error(f"❌ Exception during yb-admin stream listing: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup yb-admin streams: {e}")
+            return False
+    
+    async def _cleanup_all_yb_admin_streams(self) -> bool:
+        """Clean up ALL yb-admin CDC streams at startup"""
+        try:
+            import subprocess
+            
+            logger.info(f"🧹 Attempting to clean up ALL yb-admin CDC streams at startup")
+            
+            # List all CDC streams
+            list_cmd = [
+                "yb-admin", 
+                "--master_addresses", self.db_master_addresses,
+                "list_cdc_streams"
+            ]
+            
+            logger.info(f"Listing all CDC streams: {' '.join(list_cmd)}")
+            
+            try:
+                result = subprocess.run(
+                    list_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"📋 Found CDC streams:")
+                    logger.info(result.stdout)
+                    
+                    # Parse all stream IDs from the output
+                    all_streams = []
+                    lines = result.stdout.strip().split('\n')
+                    
+                    for line in lines:
+                        if 'stream_id' in line.lower():
+                            parts = line.split()
+                            for i, part in enumerate(parts):
+                                if 'stream_id' in part.lower() and i + 1 < len(parts):
+                                    stream_id = parts[i + 1].strip(':')
+                                    all_streams.append(stream_id)
+                                    logger.info(f"🎯 Found stream to delete: {stream_id}")
+                    
+                    if len(all_streams) == 0:
+                        logger.info(f"✅ No yb-admin CDC streams found to clean up")
+                        return True
+                    
+                    # Delete all streams
+                    deletion_success = True
+                    for stream_id in all_streams:
+                        delete_cmd = [
+                            "yb-admin",
+                            "--master_addresses", self.db_master_addresses,
+                            "delete_cdc_stream", stream_id
+                        ]
+                        
+                        logger.info(f"Deleting CDC stream: {' '.join(delete_cmd)}")
+                        
+                        try:
+                            delete_result = subprocess.run(
+                                delete_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            
+                            if delete_result.returncode == 0:
+                                logger.info(f"✅ Successfully deleted CDC stream: {stream_id}")
+                            else:
+                                logger.warning(f"⚠️ Could not delete CDC stream {stream_id}: {delete_result.stderr}")
+                                # Don't fail the entire process for individual stream deletion failures
+                                
+                        except subprocess.TimeoutExpired:
+                            logger.warning(f"⏰ Timeout deleting CDC stream: {stream_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Exception deleting CDC stream {stream_id}: {e}")
+                    
+                    logger.info(f"✅ Completed yb-admin CDC stream cleanup (attempted {len(all_streams)} streams)")
+                    return True
+                    
+                else:
+                    logger.warning(f"⚠️ Could not list CDC streams: {result.stderr}")
+                    return False
+                    
+            except subprocess.TimeoutExpired:
+                logger.warning(f"⏰ Timeout listing CDC streams")
+                return False
+            except FileNotFoundError:
+                logger.warning(f"⚠️ yb-admin command not found - skipping automated cleanup")
+                logger.warning(f"This is expected if running outside YugabyteDB environment")
+                return True  # Don't fail startup if yb-admin is not available
+            except Exception as e:
+                logger.warning(f"⚠️ Exception during yb-admin stream listing: {e}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to cleanup all yb-admin streams: {e}")
+            return False
     
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
@@ -330,12 +573,20 @@ class DebeziumConnectorManager:
                                 logger.error(f"Error: Cannot create a replication slot on the same namespace which already has a yb-admin stream on it")
                                 
                                 if attempt < max_retries - 1:
-                                    logger.warning(f"Will attempt aggressive cleanup and retry...")
-                                    # Force a longer wait to let any previous cleanup take effect  
-                                    await asyncio.sleep(15)
+                                    logger.warning(f"Attempting automated yb-admin stream cleanup...")
+                                    # Try automated yb-admin cleanup
+                                    cleanup_success = await self._cleanup_yb_admin_streams(database_name)
+                                    if cleanup_success:
+                                        logger.info(f"✅ Automated yb-admin stream cleanup completed, retrying connector creation...")
+                                        await asyncio.sleep(10)  # Give YugabyteDB time to process cleanup
+                                    else:
+                                        logger.warning(f"Automated cleanup failed, waiting longer before retry...")
+                                        await asyncio.sleep(15)
                                 else:
                                     logger.error(f"❌ PERSISTENT YB-ADMIN STREAM CONFLICT")
-                                    logger.error(f"Manual intervention may be required:")
+                                    logger.error(f"Attempting final automated cleanup before giving up...")
+                                    await self._cleanup_yb_admin_streams(database_name)
+                                    logger.error(f"Manual intervention may still be required:")
                                     logger.error(f"  1. Connect to YugabyteDB master: {self.db_master_addresses}")
                                     logger.error(f"  2. Run: yb-admin --master_addresses {self.db_master_addresses} list_cdc_streams")
                                     logger.error(f"  3. Delete conflicting streams for database: {database_name}")
@@ -376,12 +627,19 @@ class DebeziumConnectorManager:
                                         logger.error(f"This indicates existing CDC streams created via yb-admin tool")
                                         
                                         if attempt < max_retries - 1:
-                                            logger.warning(f"Will attempt aggressive cleanup and retry...")
-                                            # Force a longer wait to let any previous cleanup take effect
-                                            await asyncio.sleep(15)
+                                            logger.warning(f"Attempting automated yb-admin stream cleanup...")
+                                            cleanup_success = await self._cleanup_yb_admin_streams(database_name)
+                                            if cleanup_success:
+                                                logger.info(f"✅ Automated cleanup completed, retrying...")
+                                                await asyncio.sleep(10)
+                                            else:
+                                                logger.warning(f"Automated cleanup failed, waiting longer...")
+                                                await asyncio.sleep(15)
                                         else:
                                             logger.error(f"❌ PERSISTENT YB-ADMIN STREAM CONFLICT")
-                                            logger.error(f"Manual intervention may be required:")
+                                            logger.error(f"Attempting final cleanup before giving up...")
+                                            await self._cleanup_yb_admin_streams(database_name)
+                                            logger.error(f"Manual intervention may still be required:")
                                             logger.error(f"  1. Connect to YugabyteDB master: {self.db_master_addresses}")
                                             logger.error(f"  2. Run: yb-admin --master_addresses {self.db_master_addresses} list_cdc_streams")
                                             logger.error(f"  3. Delete conflicting streams for database: {database_name}")
