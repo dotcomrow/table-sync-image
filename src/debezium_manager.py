@@ -394,7 +394,7 @@ class DebeziumConnectorManager:
             logger.warning(f"⚠️ Failed to cleanup all yb-admin streams: {e}")
             return False
     
-    async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
+    async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str, cdc_stream_id: Optional[str] = None) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
         
         connector_name = f"yugabyte-{database_name}-{schema_name}-{table_name}"
@@ -419,41 +419,55 @@ class DebeziumConnectorManager:
             # When CDC stream exists, use a different snapshot mode
             logger.info(f"Using 'never' snapshot mode since CDC stream already exists")
         
+        # Add CDC stream ID configuration if provided
+        config_dict = {
+            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+            "tasks.max": "1",
+            
+            # YugabyteDB gRPC connector specific config
+            "database.hostname": self.db_hostname,
+            "database.port": self.db_port,
+            "database.user": self.db_user,
+            "database.password": self.db_password,
+            "database.dbname": database_name,
+            "database.master.addresses": self.db_master_addresses,
+            "database.server.name": f"yugabyte-{database_name}-{schema_name}",
+            "table.include.list": f"{schema_name}.{table_name}",
+            
+            # YugabyteDB specific settings - use provided stream ID for reuse
+            "snapshot.mode": "never",  # We handle initial data separately
+            
+            # Try without transforms first to see if connector works
+            # Key and value converters
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "false",
+            "value.converter.schemas.enable": "false",
+            
+            # YugabyteDB CDC specific settings
+            "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
+            "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
+            
+            # Error handling
+            "errors.tolerance": "all",
+            "errors.log.enable": "true",
+            "errors.log.include.messages": "true"
+        }
+        
+        # Add stream ID configuration if provided for database-level stream reuse
+        if cdc_stream_id:
+            logger.info(f"📊 Using provided CDC stream ID: {cdc_stream_id}")
+            config_dict.update({
+                "database.stream.id": cdc_stream_id,
+                "database.streamid": cdc_stream_id,
+                "yugabyte.stream.id": cdc_stream_id,
+            })
+        else:
+            logger.info("📊 No CDC stream ID provided - connector will auto-create stream")
+        
         connector_config = {
             "name": connector_name,
-            "config": {
-                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-                "tasks.max": "1",
-                
-                # YugabyteDB gRPC connector specific config
-                "database.hostname": self.db_hostname,
-                "database.port": self.db_port,
-                "database.user": self.db_user,
-                "database.password": self.db_password,
-                "database.dbname": database_name,
-                "database.master.addresses": self.db_master_addresses,
-                "database.server.name": f"yugabyte-{database_name}-{schema_name}",
-                "table.include.list": f"{schema_name}.{table_name}",
-                
-                # YugabyteDB specific settings - let Debezium auto-create CDC streams
-                "snapshot.mode": "never",  # We handle initial data separately
-                
-                # Try without transforms first to see if connector works
-                # Key and value converters
-                "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "key.converter.schemas.enable": "false",
-                "value.converter.schemas.enable": "false",
-                
-                # YugabyteDB CDC specific settings
-                "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
-                "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
-                
-                # Error handling
-                "errors.tolerance": "all",
-                "errors.log.enable": "true",
-                "errors.log.include.messages": "true"
-            }
+            "config": config_dict
         }
         
         logger.info(f"Creating connector {connector_name} with config:")

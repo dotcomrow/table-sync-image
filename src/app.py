@@ -82,6 +82,7 @@ class TableState:
     bootstrap_config: Optional[TableBootstrapConfig]
     bigquery_created: bool
     pipeline_configured: bool
+    cdc_stream_id: Optional[str]  # YugabyteDB CDC stream ID for reuse across deployments
     last_updated: datetime
     
     def to_dict(self) -> Dict:
@@ -265,15 +266,87 @@ class DatabaseManager:
             logger.error(f"Schema preparation failed: {e}")
             raise
     
-    async def _create_state_table(self, conn):
-        """Create the table sync state tracking table and related objects"""
-        logger.info("Creating state table and indexes...")
-        
+    async def _get_current_schema_version(self, conn) -> int:
+        """Get the current schema version of the state table"""
         try:
-            # Create the main state table
-            create_table_sql = """
+            # Check if metadata table exists
+            metadata_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'table_sync_metadata'
+                )
+            """)
+            
+            if not metadata_exists:
+                return 0  # No metadata table means version 0
+            
+            # Get schema version from metadata
+            version = await conn.fetchval("""
+                SELECT value::integer FROM table_sync_metadata 
+                WHERE key = 'schema_version'
+            """)
+            
+            return version if version is not None else 0
+            
+        except Exception as e:
+            logger.debug(f"Error getting schema version: {e}")
+            return 0
+    
+    async def _set_schema_version(self, conn, version: int):
+        """Set the schema version in metadata table"""
+        await conn.execute("""
+            INSERT INTO table_sync_metadata (key, value, updated_at)
+            VALUES ('schema_version', $1, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                updated_at = EXCLUDED.updated_at
+        """, str(version))
+    
+    async def _column_exists(self, conn, table_name: str, column_name: str) -> bool:
+        """Check if a column exists in a table"""
+        return await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = $1 
+                AND column_name = $2
+            )
+        """, table_name, column_name)
+    
+    async def _migrate_schema_to_version(self, conn, target_version: int):
+        """Migrate schema from current version to target version"""
+        current_version = await self._get_current_schema_version(conn)
+        logger.info(f"Migrating schema from version {current_version} to {target_version}")
+        
+        # Apply migrations sequentially
+        for version in range(current_version + 1, target_version + 1):
+            logger.info(f"Applying migration to version {version}")
+            await self._apply_migration(conn, version)
+            await self._set_schema_version(conn, version)
+            logger.info(f"✅ Migration to version {version} completed")
+    
+    async def _apply_migration(self, conn, version: int):
+        """Apply a specific schema migration"""
+        if version == 1:
+            # Version 1: Initial schema with basic columns
+            await self._migration_v1_initial_schema(conn)
+        elif version == 2:
+            # Version 2: Add database_name column
+            await self._migration_v2_add_database_name(conn)
+        elif version == 3:
+            # Version 3: Add cdc_stream_id column
+            await self._migration_v3_add_cdc_stream_id(conn)
+        else:
+            logger.warning(f"Unknown migration version: {version}")
+    
+    async def _migration_v1_initial_schema(self, conn):
+        """Migration v1: Create initial table structure"""
+        logger.info("📦 Migration v1: Creating initial table structure")
+        
+        # Create main state table (original schema)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS table_sync_state (
-                database_name VARCHAR(255) NOT NULL,
                 schema_name VARCHAR(255) NOT NULL,
                 table_name VARCHAR(255) NOT NULL,
                 comment_hash VARCHAR(64),
@@ -282,45 +355,185 @@ class DatabaseManager:
                 pipeline_configured BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                PRIMARY KEY (database_name, schema_name, table_name)
+                PRIMARY KEY (schema_name, table_name)
             );
-            """
-            await conn.execute(create_table_sql)
+        """)
+        
+        # Create metadata table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS table_sync_metadata (
+                key VARCHAR(255) PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        """)
+        
+        # Create indexes
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_table_sync_state_updated 
+            ON table_sync_state(last_updated);
+        """)
+        
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_table_sync_state_bootstrap 
+            ON table_sync_state(bigquery_created, pipeline_configured);
+        """)
+    
+    async def _migration_v2_add_database_name(self, conn):
+        """Migration v2: Add database_name column and update primary key"""
+        logger.info("📦 Migration v2: Adding database_name column")
+        
+        # Add database_name column if it doesn't exist
+        if not await self._column_exists(conn, 'table_sync_state', 'database_name'):
+            await conn.execute("""
+                ALTER TABLE table_sync_state 
+                ADD COLUMN database_name VARCHAR(255);
+            """)
             
-            # Check if we need to migrate existing table to add database_name column
+            # Update existing rows with current database name
+            current_db = await conn.fetchval("SELECT current_database()")
+            await conn.execute("""
+                UPDATE table_sync_state 
+                SET database_name = $1 
+                WHERE database_name IS NULL;
+            """, current_db)
+            
+            # Make database_name NOT NULL
+            await conn.execute("""
+                ALTER TABLE table_sync_state 
+                ALTER COLUMN database_name SET NOT NULL;
+            """)
+            
+            # Update primary key to include database_name
             try:
                 await conn.execute("""
                     ALTER TABLE table_sync_state 
-                    ADD COLUMN IF NOT EXISTS database_name VARCHAR(255);
+                    DROP CONSTRAINT IF EXISTS table_sync_state_pkey;
+                """)
+                await conn.execute("""
+                    ALTER TABLE table_sync_state 
+                    ADD PRIMARY KEY (database_name, schema_name, table_name);
+                """)
+                logger.info("✅ Updated primary key to include database_name")
+            except Exception as e:
+                logger.warning(f"Primary key update failed (might already be correct): {e}")
+    
+    async def _migration_v3_add_cdc_stream_id(self, conn):
+        """Migration v3: Add cdc_stream_id column"""
+        logger.info("📦 Migration v3: Adding cdc_stream_id column")
+        
+        if not await self._column_exists(conn, 'table_sync_state', 'cdc_stream_id'):
+            await conn.execute("""
+                ALTER TABLE table_sync_state 
+                ADD COLUMN cdc_stream_id VARCHAR(64);
+            """)
+            logger.info("✅ Added cdc_stream_id column")
+    
+    async def _create_latest_schema(self, conn):
+        """Create the latest schema directly for new installations"""
+        logger.info("📦 Creating latest schema (v3) for new installation")
+        
+        # Create the main state table with all current columns
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS table_sync_state (
+            database_name VARCHAR(255) NOT NULL,
+            schema_name VARCHAR(255) NOT NULL,
+            table_name VARCHAR(255) NOT NULL,
+            comment_hash VARCHAR(64),
+            bootstrap_config JSONB,
+            bigquery_created BOOLEAN DEFAULT FALSE,
+            pipeline_configured BOOLEAN DEFAULT FALSE,
+            cdc_stream_id VARCHAR(64),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (database_name, schema_name, table_name)
+        );
+        """
+        await conn.execute(create_table_sql)
+        
+        # Create indexes
+        indexes_sql = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_table_sync_state_bigquery_created 
+            ON table_sync_state(bigquery_created) 
+            WHERE bigquery_created = FALSE;
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_table_sync_state_pipeline_configured 
+            ON table_sync_state(pipeline_configured) 
+            WHERE pipeline_configured = TRUE;
+            """
+        ]
+        
+        for index_sql in indexes_sql:
+            await conn.execute(index_sql)
+        
+        # Create metadata table
+        metadata_table_sql = """
+        CREATE TABLE IF NOT EXISTS table_sync_metadata (
+            key VARCHAR(255) PRIMARY KEY,
+            value JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        """
+        await conn.execute(metadata_table_sql)
+        
+        logger.info("✅ Latest schema created successfully")
+    
+    async def _create_state_table(self, conn):
+        """Create the table sync state tracking table and related objects with proper migrations"""
+        logger.info("Creating/migrating state table and indexes...")
+        
+        try:
+            # Current schema version (increment when adding new migrations)
+            CURRENT_SCHEMA_VERSION = 3
+            
+            # Get current schema version
+            current_version = await self._get_current_schema_version(conn)
+            logger.info(f"Current schema version: {current_version}, Target version: {CURRENT_SCHEMA_VERSION}")
+            
+            # If this is a completely new installation, create everything directly
+            if current_version == 0:
+                # Check if the table already exists (legacy installation)
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'table_sync_state'
+                    )
                 """)
                 
-                # If the column was just added, update existing rows with current database name
-                current_db = await conn.fetchval("SELECT current_database()")
-                await conn.execute("""
-                    UPDATE table_sync_state 
-                    SET database_name = $1 
-                    WHERE database_name IS NULL;
-                """, current_db)
-                
-                # Update primary key if needed (this might fail if already correct)
-                try:
-                    await conn.execute("""
-                        ALTER TABLE table_sync_state 
-                        DROP CONSTRAINT IF EXISTS table_sync_state_pkey;
-                    """)
-                    await conn.execute("""
-                        ALTER TABLE table_sync_state 
-                        ADD PRIMARY KEY (database_name, schema_name, table_name);
-                    """)
-                except Exception:
-                    # Primary key update failed, that's okay if it already exists
-                    pass
+                if table_exists:
+                    logger.info("Found existing table - determining version and migrating")
+                    # Determine version based on existing columns
+                    has_database_name = await self._column_exists(conn, 'table_sync_state', 'database_name')
+                    has_cdc_stream_id = await self._column_exists(conn, 'table_sync_state', 'cdc_stream_id')
                     
-            except Exception as e:
-                logger.warning(f"Table migration warning (this is usually okay): {e}")
+                    if has_cdc_stream_id:
+                        current_version = 3
+                    elif has_database_name:
+                        current_version = 2
+                    else:
+                        current_version = 1
+                    
+                    logger.info(f"Detected existing table at version {current_version}")
+                    await self._set_schema_version(conn, current_version)
+                else:
+                    logger.info("New installation - creating latest schema directly")
+                    # Create latest schema directly for new installations
+                    await self._create_latest_schema(conn)
+                    await self._set_schema_version(conn, CURRENT_SCHEMA_VERSION)
+                    current_version = CURRENT_SCHEMA_VERSION
             
-            # Create indexes for performance
-            indexes_sql = [
+            # Apply any pending migrations
+            if current_version < CURRENT_SCHEMA_VERSION:
+                await self._migrate_schema_to_version(conn, CURRENT_SCHEMA_VERSION)
+            
+            logger.info(f"✅ Schema is now at version {CURRENT_SCHEMA_VERSION}")
+            
+            # Create additional indexes that aren't part of the base schema
+            additional_indexes_sql = [
                 """
                 CREATE INDEX IF NOT EXISTS idx_table_sync_state_updated 
                 ON table_sync_state(last_updated);
@@ -329,46 +542,13 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_table_sync_state_bootstrap_enabled 
                 ON table_sync_state((bootstrap_config->>'enabled')) 
                 WHERE bootstrap_config IS NOT NULL;
-                """,
-                """
-                CREATE INDEX IF NOT EXISTS idx_table_sync_state_bigquery_created 
-                ON table_sync_state(bigquery_created) 
-                WHERE bigquery_created = TRUE;
-                """,
-                """
-                CREATE INDEX IF NOT EXISTS idx_table_sync_state_pipeline_configured 
-                ON table_sync_state(pipeline_configured) 
-                WHERE pipeline_configured = TRUE;
                 """
             ]
             
-            for index_sql in indexes_sql:
+            for index_sql in additional_indexes_sql:
                 await conn.execute(index_sql)
             
-            # Create a metadata table for tracking application state
-            metadata_table_sql = """
-            CREATE TABLE IF NOT EXISTS table_sync_metadata (
-                key VARCHAR(255) PRIMARY KEY,
-                value JSONB,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            """
-            await conn.execute(metadata_table_sql)
-            
-            # Insert initial metadata
-            await conn.execute("""
-                INSERT INTO table_sync_metadata (key, value) 
-                VALUES ('schema_version', 
-                    jsonb_build_object(
-                        'version', '1.0.0',
-                        'initialized_at', NOW()::text
-                    )
-                )
-                ON CONFLICT (key) DO NOTHING;
-            """)
-            
-            logger.info("State table and indexes created successfully")
+            logger.info("✅ State table and indexes ready")
             
         except Exception as e:
             logger.error(f"State table creation failed: {e}")
@@ -549,7 +729,7 @@ class DatabaseManager:
         """Get current state of all tracked tables"""
         query = """
         SELECT database_name, schema_name, table_name, comment_hash, bootstrap_config,
-               bigquery_created, pipeline_configured, last_updated
+               bigquery_created, pipeline_configured, cdc_stream_id, last_updated
         FROM table_sync_state;
         """
         
@@ -575,6 +755,7 @@ class DatabaseManager:
                 bootstrap_config=bootstrap_config,
                 bigquery_created=row['bigquery_created'],
                 pipeline_configured=row['pipeline_configured'],
+                cdc_stream_id=row['cdc_stream_id'],
                 last_updated=row['last_updated']
             )
         
@@ -584,14 +765,15 @@ class DatabaseManager:
         """Insert or update table state"""
         query = """
         INSERT INTO table_sync_state 
-        (database_name, schema_name, table_name, comment_hash, bootstrap_config, bigquery_created, pipeline_configured, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (database_name, schema_name, table_name, comment_hash, bootstrap_config, bigquery_created, pipeline_configured, cdc_stream_id, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (database_name, schema_name, table_name) 
         DO UPDATE SET
             comment_hash = EXCLUDED.comment_hash,
             bootstrap_config = EXCLUDED.bootstrap_config,
             bigquery_created = EXCLUDED.bigquery_created,
             pipeline_configured = EXCLUDED.pipeline_configured,
+            cdc_stream_id = EXCLUDED.cdc_stream_id,
             last_updated = EXCLUDED.last_updated;
         """
         
@@ -605,6 +787,7 @@ class DatabaseManager:
                 json.dumps(asdict(state.bootstrap_config)) if state.bootstrap_config else None,
                 state.bigquery_created,
                 state.pipeline_configured,
+                state.cdc_stream_id,
                 state.last_updated
             )
     
@@ -633,6 +816,94 @@ class DatabaseManager:
             return [dict(row) for row in rows]
         finally:
             await conn.close()
+    
+    async def get_or_create_cdc_stream_id(self, database_name: str) -> Optional[str]:
+        """Get existing CDC stream ID for database or create new one if needed"""
+        master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES") or os.getenv("DEBEZIUM_MASTER_ADDRESSES")
+        if not master_addresses:
+            logger.error("❌ YUGABYTE_MASTER_ADDRESSES or DEBEZIUM_MASTER_ADDRESSES environment variable required")
+            return None
+        
+        try:
+            import subprocess
+            import re
+            
+            def extract_stream_id(text: str) -> Optional[str]:
+                """Extract 32-character hex stream ID from yb-admin output"""
+                pattern = r'[0-9a-fA-F]{32}'
+                matches = re.findall(pattern, text)
+                return matches[0].lower() if matches else None
+            
+            # Step 1: Try to get existing database-level stream
+            try:
+                result = subprocess.run([
+                    'yb-admin', '--master_addresses', master_addresses,
+                    '--include_db_streams=true', 'list_change_data_streams', f'ysql.{database_name}'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    stream_id = extract_stream_id(result.stdout)
+                    if stream_id:
+                        logger.info(f"📊 Found existing CDC stream for {database_name}: {stream_id}")
+                        return stream_id
+            except Exception as e:
+                logger.debug(f"Error checking existing streams: {e}")
+            
+            # Step 2: Try replication slots view
+            try:
+                result = subprocess.run([
+                    'yb-admin', '--master_addresses', master_addresses,
+                    'list_replication_slots', f'ysql.{database_name}'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    stream_id = extract_stream_id(result.stdout)
+                    if stream_id:
+                        logger.info(f"📊 Found existing replication slot for {database_name}: {stream_id}")
+                        return stream_id
+            except Exception as e:
+                logger.debug(f"Error checking replication slots: {e}")
+            
+            # Step 3: Create new database-level CDC stream
+            logger.info(f"🔄 Creating new CDC stream for database {database_name}")
+            try:
+                result = subprocess.run([
+                    'yb-admin', '--master_addresses', master_addresses,
+                    'create_change_data_stream', f'ysql.{database_name}'
+                ], capture_output=True, text=True, timeout=60)
+                
+                if result.returncode == 0:
+                    stream_id = extract_stream_id(result.stdout)
+                    if stream_id:
+                        logger.info(f"✅ Created new CDC stream for {database_name}: {stream_id}")
+                        return stream_id
+                elif "already has replication slot" in result.stderr.lower():
+                    # Stream exists but wasn't detected - try list again
+                    logger.info(f"⚠️  Database {database_name} already has replication slot, attempting to find it")
+                    result = subprocess.run([
+                        'yb-admin', '--master_addresses', master_addresses,
+                        '--include_db_streams=true', 'list_change_data_streams', f'ysql.{database_name}'
+                    ], capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0:
+                        stream_id = extract_stream_id(result.stdout)
+                        if stream_id:
+                            logger.info(f"📊 Found existing CDC stream after creation attempt: {stream_id}")
+                            return stream_id
+                
+                logger.error(f"❌ Failed to create CDC stream for {database_name}: {result.stderr}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error creating CDC stream for {database_name}: {e}")
+            
+            return None
+            
+        except ImportError:
+            logger.error("❌ subprocess module not available for CDC stream management")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in CDC stream management: {e}")
+            return None
 
 class BigQueryManager:
     def __init__(self, project_id: str):
@@ -752,15 +1023,15 @@ class PipelineManager:
         self.connector_manager = DebeziumConnectorManager(debezium_url)
         self.publication_manager = YugabytePublicationManager(db_pool)
     
-    async def setup_debezium_connector(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig):
+    async def setup_debezium_connector(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig, cdc_stream_id: Optional[str] = None):
         """Setup Debezium connector for a table"""
         logger.info(f"Setting up Debezium connector for {database_name}.{schema_name}.{table_name}")
         
         try:
             # YugabyteDB gRPC connector doesn't need publications - it uses native streaming
-            # Create Debezium connector directly
+            # Create Debezium connector directly with stream ID for reuse
             conn_success = await self.connector_manager.create_connector(
-                database_name, schema_name, table_name, config.bq_table
+                database_name, schema_name, table_name, config.bq_table, cdc_stream_id
             )
             if not conn_success:
                 logger.error(f"Failed to create Debezium connector for {database_name}.{schema_name}.{table_name}")
@@ -1102,12 +1373,19 @@ class TableSyncManager:
                 except Exception as e:
                     logger.warning(f"   ⚠️  Data sync failed: {e}")
             
-            # Step 3: Handle pipeline
+            # Step 3: Get or create CDC stream ID for database-level reuse
+            cdc_stream_id = await self.db_manager.get_or_create_cdc_stream_id(database_name)
+            if cdc_stream_id:
+                logger.info(f"   📊 CDC Stream ID for {database_name}: {cdc_stream_id}")
+            else:
+                logger.warning(f"   ⚠️  Could not obtain CDC stream ID for {database_name}")
+            
+            # Step 4: Handle pipeline
             pipeline_success = actual_pipeline_exists
             if not actual_pipeline_exists:
                 logger.info(f"   🔗 Setting up Debezium connector...")
                 try:
-                    pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config)
+                    pipeline_success = await self.pipeline_manager.setup_debezium_connector(database_name, schema_name, table_name, config, cdc_stream_id)
                     if pipeline_success:
                         logger.info(f"   ✅ Debezium connector created successfully")
                     else:
@@ -1118,8 +1396,8 @@ class TableSyncManager:
             else:
                 logger.info(f"   🔗 Debezium connector already exists")
             
-            # Step 4: Update state with verified information
-            await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, bq_success, pipeline_success)
+            # Step 5: Update state with verified information including CDC stream ID
+            await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, bq_success, pipeline_success, cdc_stream_id)
             
             status = "✅ SUCCESS" if (bq_success and pipeline_success) else "⚠️  PARTIAL"
             logger.info(f"🎯 {status}: {database_name}.{schema_name}.{table_name} - BQ={bq_success}, Pipeline={pipeline_success}")
@@ -1128,7 +1406,7 @@ class TableSyncManager:
             logger.error(f"❌ Error in full setup check for {database_name}.{schema_name}.{table_name}: {e}")
             await self._update_table_state_verified(database_name, schema_name, table_name, comment_hash, config, False, False)
 
-    async def _update_table_state_verified(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig, bq_created: bool, pipeline_configured: bool):
+    async def _update_table_state_verified(self, database_name: str, schema_name: str, table_name: str, comment_hash: str, config: TableBootstrapConfig, bq_created: bool, pipeline_configured: bool, cdc_stream_id: Optional[str] = None):
         """Update table state with verified actual state"""
         state = TableState(
             database_name=database_name,
@@ -1138,6 +1416,7 @@ class TableSyncManager:
             bootstrap_config=config,
             bigquery_created=bq_created,
             pipeline_configured=pipeline_configured,
+            cdc_stream_id=cdc_stream_id,
             last_updated=datetime.now(timezone.utc)
         )
         await self.db_manager.upsert_table_state(state)
@@ -1153,6 +1432,7 @@ class TableSyncManager:
             bootstrap_config=config,
             bigquery_created=False,
             pipeline_configured=False,
+            cdc_stream_id=None,
             last_updated=datetime.now(timezone.utc)
         )
         await self.db_manager.upsert_table_state(state)
@@ -1167,6 +1447,7 @@ class TableSyncManager:
             bootstrap_config=config,
             bigquery_created=False,
             pipeline_configured=False,
+            cdc_stream_id=None,
             last_updated=datetime.now(timezone.utc)
         )
         await self.db_manager.upsert_table_state(state)
