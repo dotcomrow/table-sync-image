@@ -104,6 +104,9 @@ class DatabaseManager:
         """Initialize database connection pool and prepare schema"""
         logger.info("Initializing database manager...")
         
+        # Ensure target database exists before creating connection pool
+        await self._ensure_database_exists()
+        
         # Create connection pool
         try:
             self.pool = await asyncpg.create_pool(
@@ -125,6 +128,46 @@ class DatabaseManager:
         if self.pool:
             await self.pool.close()
             logger.info("Database connection pool closed")
+    
+    async def _ensure_database_exists(self):
+        """Ensure the target database exists, create if it doesn't"""
+        import urllib.parse
+        
+        # Parse the database URL to extract components
+        parsed = urllib.parse.urlparse(self.database_url)
+        target_db_name = parsed.path.lstrip('/')
+        
+        # Create URL for default 'yugabyte' database to check/create target database
+        default_db_url = f"{parsed.scheme}://{parsed.netloc}/yugabyte"
+        
+        logger.info(f"Checking if database '{target_db_name}' exists...")
+        
+        try:
+            # Connect to default database to check if target exists
+            conn = await asyncpg.connect(default_db_url)
+            try:
+                # Check if target database exists
+                result = await conn.fetchval(
+                    "SELECT 1 FROM pg_database WHERE datname = $1", 
+                    target_db_name
+                )
+                
+                if result:
+                    logger.info(f"✅ Database '{target_db_name}' already exists")
+                else:
+                    logger.info(f"🔧 Database '{target_db_name}' does not exist, creating...")
+                    
+                    # Create the database
+                    await conn.execute(f'CREATE DATABASE "{target_db_name}"')
+                    logger.info(f"✅ Successfully created database '{target_db_name}'")
+                    
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"Failed to ensure database '{target_db_name}' exists: {e}")
+            logger.error(f"This might be due to insufficient permissions or connectivity issues")
+            raise
     
     async def _validate_and_prepare_schema(self):
         """Validate database connection and prepare schema if needed"""
