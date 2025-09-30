@@ -27,11 +27,16 @@ class DebeziumConnectorManager:
         
         logger.info(f"Debezium will connect to YugabyteDB at {self.db_hostname}:{self.db_port} as user {self.db_user}")
         
+        # Get YugabyteDB master addresses from environment
+        self.db_master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES", f"{self.db_hostname}:7100")
+        logger.info(f"YugabyteDB master addresses: {self.db_master_addresses}")
+        
         # Allow override via specific environment variables if needed
         self.db_hostname = os.getenv("DEBEZIUM_DATABASE_HOSTNAME", self.db_hostname)
         self.db_port = os.getenv("DEBEZIUM_DATABASE_PORT", self.db_port)
         self.db_user = os.getenv("DEBEZIUM_DATABASE_USER", self.db_user)
         self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", self.db_password)
+        self.db_master_addresses = os.getenv("DEBEZIUM_MASTER_ADDRESSES", self.db_master_addresses)
     
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
@@ -70,6 +75,7 @@ class DebeziumConnectorManager:
                 "database.user": self.db_user,
                 "database.password": self.db_password,
                 "database.dbname": database_name,
+                "database.master.addresses": self.db_master_addresses,
                 "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
                 
