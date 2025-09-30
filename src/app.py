@@ -18,6 +18,10 @@ import sqlparse
 from aiohttp import web, web_response
 import aiohttp
 
+# Application version - update this when making significant changes
+APP_VERSION = "v2.4.0-simplified-config"
+BUILD_DATE = "2025-09-30"
+
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
 BIGQUERY_PROJECT_ID = os.getenv("BIGQUERY_PROJECT_ID")
@@ -1912,6 +1916,7 @@ async def main():
     """Main application loop"""
     logger.info("=" * 60)
     logger.info("STARTING TABLE SYNC APPLICATION")
+    logger.info(f"Version: {APP_VERSION} (Built: {BUILD_DATE})")
     logger.info("=" * 60)
     
     # Log configuration

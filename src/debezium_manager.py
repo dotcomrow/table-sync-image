@@ -8,6 +8,9 @@ from typing import Dict, Optional
 from loguru import logger
 import os
 
+# Version information (should match app.py)
+DEBEZIUM_MANAGER_VERSION = "v2.4.0-simplified-config"
+
 class DebeziumConnectorManager:
     def __init__(self, connector_url: str):
         self.connector_url = connector_url.rstrip('/')
@@ -25,7 +28,7 @@ class DebeziumConnectorManager:
         self.db_user = parsed.username or "yugabyte"
         self.db_password = parsed.password or "yugabyte"
         
-        logger.info(f"Debezium will connect to YugabyteDB at {self.db_hostname}:{self.db_port} as user {self.db_user}")
+        logger.info(f"Debezium Manager {DEBEZIUM_MANAGER_VERSION} - connecting to YugabyteDB at {self.db_hostname}:{self.db_port} as user {self.db_user}")
         
         # Get YugabyteDB master addresses from environment
         self.db_master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES", f"{self.db_hostname}:7100")
@@ -432,14 +435,9 @@ class DebeziumConnectorManager:
             "database.dbname": database_name,
             "database.master.addresses": self.db_master_addresses,
             "database.server.name": f"yugabyte-{database_name}-{schema_name}",
+            
+            # Use only table.include.list for table filtering (most specific)
             "table.include.list": f"{schema_name}.{table_name}",
-            
-            # YugabyteDB table filtering - be explicit about what we want
-            "schema.include.list": f"{schema_name}",
-            
-            # Reduce noise from filtered tables
-            "log.mining.filter.enabled": "true",
-            "table.exclude.list": "",  # Be explicit that we're not excluding by pattern
             
             # YugabyteDB specific settings - use provided stream ID for reuse
             "snapshot.mode": "never",  # We handle initial data separately
