@@ -38,6 +38,20 @@ class DebeziumConnectorManager:
         self.db_password = os.getenv("DEBEZIUM_DATABASE_PASSWORD", self.db_password)
         self.db_master_addresses = os.getenv("DEBEZIUM_MASTER_ADDRESSES", self.db_master_addresses)
     
+    def _generate_stream_id(self, database_name: str, schema_name: str, table_name: str) -> str:
+        """Generate a proper 32-character hex stream ID for YugabyteDB"""
+        import hashlib
+        
+        # Create a unique identifier from database, schema, and table
+        identifier = f"{database_name}.{schema_name}.{table_name}"
+        
+        # Generate SHA-256 hash and take first 32 characters (16 bytes in hex)
+        hash_object = hashlib.sha256(identifier.encode())
+        stream_id = hash_object.hexdigest()[:32]
+        
+        logger.info(f"Generated stream ID for {identifier}: {stream_id}")
+        return stream_id
+    
     async def create_connector(self, database_name: str, schema_name: str, table_name: str, bq_table: str) -> bool:
         """Create a Debezium connector for a YugabyteDB table"""
         
@@ -79,8 +93,8 @@ class DebeziumConnectorManager:
                 "database.server.name": f"yugabyte-{database_name}-{schema_name}",
                 "table.include.list": f"{schema_name}.{table_name}",
                 
-                # YugabyteDB specific settings - try different stream ID format
-                "database.streamid": f"{database_name}_{schema_name}_{table_name}_stream",
+                # YugabyteDB specific settings - generate proper 32-char hex stream ID
+                "database.streamid": self._generate_stream_id(database_name, schema_name, table_name),
                 "snapshot.mode": "never",  # We handle initial data separately
                 
                 # Try without transforms first to see if connector works
@@ -207,7 +221,7 @@ class DebeziumConnectorManager:
         database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
         db_url = database_url.rsplit('/', 1)[0] + f'/{database_name}'
         
-        stream_id = f"{database_name}_{schema_name}_{table_name}_stream"
+        stream_id = self._generate_stream_id(database_name, schema_name, table_name)
         logger.info(f"Attempting to clean up potential stale CDC stream: {stream_id}")
         
         try:
