@@ -436,7 +436,6 @@ class DebeziumConnectorManager:
             
             # YugabyteDB table filtering - be explicit about what we want
             "schema.include.list": f"{schema_name}",
-            "table.whitelist": f"{schema_name}.{table_name}",  # Fallback for older versions
             
             # Reduce noise from filtered tables
             "log.mining.filter.enabled": "true",
