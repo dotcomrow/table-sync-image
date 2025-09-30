@@ -434,6 +434,14 @@ class DebeziumConnectorManager:
             "database.server.name": f"yugabyte-{database_name}-{schema_name}",
             "table.include.list": f"{schema_name}.{table_name}",
             
+            # YugabyteDB table filtering - be explicit about what we want
+            "schema.include.list": f"{schema_name}",
+            "table.whitelist": f"{schema_name}.{table_name}",  # Fallback for older versions
+            
+            # Reduce noise from filtered tables
+            "log.mining.filter.enabled": "true",
+            "table.exclude.list": "",  # Be explicit that we're not excluding by pattern
+            
             # YugabyteDB specific settings - use provided stream ID for reuse
             "snapshot.mode": "never",  # We handle initial data separately
             

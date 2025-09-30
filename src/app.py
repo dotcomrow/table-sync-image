@@ -817,8 +817,8 @@ class DatabaseManager:
         finally:
             await conn.close()
     
-    async def get_or_create_cdc_stream_id(self, database_name: str) -> Optional[str]:
-        """Get existing CDC stream ID for database or create new one if needed"""
+    async def get_or_create_cdc_stream_id(self, database_name: str, schema_name: str = None, table_name: str = None) -> Optional[str]:
+        """Get existing CDC stream ID for table or create new one if needed"""
         master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES") or os.getenv("DEBEZIUM_MASTER_ADDRESSES")
         if not master_addresses:
             logger.error("❌ YUGABYTE_MASTER_ADDRESSES or DEBEZIUM_MASTER_ADDRESSES environment variable required")
@@ -834,7 +834,47 @@ class DatabaseManager:
                 matches = re.findall(pattern, text)
                 return matches[0].lower() if matches else None
             
-            # Step 1: Try to get existing database-level stream
+            # If table-specific parameters provided, create table-level stream
+            if schema_name and table_name:
+                table_identifier = f"{database_name}.{schema_name}.{table_name}"
+                logger.info(f"🔄 Managing table-specific CDC stream for {table_identifier}")
+                
+                # Step 1: Try to get existing table-level stream
+                try:
+                    result = subprocess.run([
+                        'yb-admin', '--master_addresses', master_addresses,
+                        'list_change_data_streams', f'ysql.{database_name}.{schema_name}.{table_name}'
+                    ], capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0:
+                        stream_id = extract_stream_id(result.stdout)
+                        if stream_id:
+                            logger.info(f"📊 Found existing table-level CDC stream for {table_identifier}: {stream_id}")
+                            return stream_id
+                except Exception as e:
+                    logger.debug(f"Error checking existing table streams: {e}")
+                
+                # Step 2: Create new table-level CDC stream
+                logger.info(f"🔄 Creating new table-level CDC stream for {table_identifier}")
+                try:
+                    result = subprocess.run([
+                        'yb-admin', '--master_addresses', master_addresses,
+                        'create_change_data_stream', f'ysql.{database_name}.{schema_name}.{table_name}'
+                    ], capture_output=True, text=True, timeout=60)
+                    
+                    if result.returncode == 0:
+                        stream_id = extract_stream_id(result.stdout)
+                        if stream_id:
+                            logger.info(f"✅ Created new table-level CDC stream for {table_identifier}: {stream_id}")
+                            return stream_id
+                    
+                    logger.warning(f"⚠️  Table-level CDC stream creation failed, falling back to database-level stream")
+                    logger.debug(f"Table-level CDC error: {result.stderr}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️  Error creating table-level CDC stream, falling back to database-level: {e}")
+            
+            # Fallback: Try to get existing database-level stream
             try:
                 result = subprocess.run([
                     'yb-admin', '--master_addresses', master_addresses,
@@ -844,10 +884,10 @@ class DatabaseManager:
                 if result.returncode == 0:
                     stream_id = extract_stream_id(result.stdout)
                     if stream_id:
-                        logger.info(f"📊 Found existing CDC stream for {database_name}: {stream_id}")
+                        logger.info(f"📊 Found existing database-level CDC stream for {database_name}: {stream_id}")
                         return stream_id
             except Exception as e:
-                logger.debug(f"Error checking existing streams: {e}")
+                logger.debug(f"Error checking existing database streams: {e}")
             
             # Step 2: Try replication slots view
             try:
@@ -1373,12 +1413,12 @@ class TableSyncManager:
                 except Exception as e:
                     logger.warning(f"   ⚠️  Data sync failed: {e}")
             
-            # Step 3: Get or create CDC stream ID for database-level reuse
-            cdc_stream_id = await self.db_manager.get_or_create_cdc_stream_id(database_name)
+            # Step 3: Get or create CDC stream ID for table-specific streaming
+            cdc_stream_id = await self.db_manager.get_or_create_cdc_stream_id(database_name, schema_name, table_name)
             if cdc_stream_id:
-                logger.info(f"   📊 CDC Stream ID for {database_name}: {cdc_stream_id}")
+                logger.info(f"   📊 CDC Stream ID for {database_name}.{schema_name}.{table_name}: {cdc_stream_id}")
             else:
-                logger.warning(f"   ⚠️  Could not obtain CDC stream ID for {database_name}")
+                logger.warning(f"   ⚠️  Could not obtain CDC stream ID for {database_name}.{schema_name}.{table_name}")
             
             # Step 4: Handle pipeline
             pipeline_success = actual_pipeline_exists
