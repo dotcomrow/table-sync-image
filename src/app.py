@@ -27,6 +27,7 @@ DEBEZIUM_CONNECTOR_URL = os.getenv("DEBEZIUM_CONNECTOR_URL", "http://localhost:8
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
+CDC_TEST_MODE = os.getenv("CDC_TEST_MODE", "false").lower() == "true"
 
 # Configure logging
 logger.remove()
@@ -1370,6 +1371,210 @@ async def validate_external_dependencies(sync_manager: 'TableSyncManager'):
     
     logger.info("External dependency validation completed")
 
+async def run_cdc_compatibility_test():
+    """Run a minimal CDC compatibility test to isolate YugabyteDB/Debezium issues"""
+    logger.info("🧪" + "=" * 60)
+    logger.info("🧪 RUNNING CDC COMPATIBILITY TEST")
+    logger.info("🧪" + "=" * 60)
+    
+    try:
+        # Import required modules
+        import asyncpg
+        import aiohttp
+        import json
+        
+        # Parse database URL for connection details
+        import urllib.parse
+        parsed = urllib.parse.urlparse(DATABASE_URL)
+        db_name = parsed.path.lstrip('/')
+        
+        logger.info(f"🧪 Test database: {db_name}")
+        logger.info(f"🧪 YugabyteDB host: {parsed.hostname}:{parsed.port}")
+        logger.info(f"🧪 Debezium URL: {DEBEZIUM_CONNECTOR_URL}")
+        
+        # Step 1: Create simple test table
+        logger.info("🧪 Step 1: Creating simple test table...")
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            await conn.execute("""
+                DROP TABLE IF EXISTS public.cdc_test_simple CASCADE;
+                CREATE TABLE public.cdc_test_simple (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100),
+                    test_value INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            
+            # Insert test data
+            await conn.execute("""
+                INSERT INTO public.cdc_test_simple (name, test_value) 
+                VALUES ('test1', 100), ('test2', 200), ('test3', 300);
+            """)
+            
+            logger.info("✅ Test table created with 3 sample rows")
+            
+        finally:
+            await conn.close()
+        
+        # Step 2: Create minimal CDC connector
+        logger.info("🧪 Step 2: Creating minimal CDC connector...")
+        
+        connector_config = {
+            "name": "yugabyte-cdc-compatibility-test",
+            "config": {
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "database.hostname": parsed.hostname,
+                "database.port": str(parsed.port),
+                "database.user": parsed.username or "yugabyte",
+                "database.password": parsed.password or "",
+                "database.dbname": db_name,
+                "database.server.name": "cdc-compatibility-test",
+                "table.include.list": "public.cdc_test_simple",
+                
+                # Minimal, safe configuration
+                "before.image.mode": "never",
+                "snapshot.mode": "never",
+                "cdcsdk.wal.segment.size": "1024",
+                "cdcsdk.connection.timeout": "10000",
+                "errors.tolerance": "all",
+                "errors.log.enable": "true"
+            }
+        }
+        
+        # Delete any existing test connector first
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.delete(f"{DEBEZIUM_CONNECTOR_URL}/connectors/yugabyte-cdc-compatibility-test") as response:
+                    if response.status in [200, 204]:
+                        logger.info("🧹 Deleted existing test connector")
+                    await asyncio.sleep(2)  # Wait for cleanup
+            except:
+                pass
+            
+            # Create new connector
+            logger.info("🔌 Creating CDC connector with minimal configuration...")
+            async with session.post(
+                f"{DEBEZIUM_CONNECTOR_URL}/connectors",
+                json=connector_config,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                response_text = await response.text()
+                
+                if response.status == 201:
+                    logger.info("✅ CDC connector created successfully!")
+                    
+                    # Step 3: Monitor connector health
+                    logger.info("🧪 Step 3: Monitoring connector health for 30 seconds...")
+                    
+                    for i in range(6):  # Check 6 times over 30 seconds
+                        await asyncio.sleep(5)
+                        
+                        async with session.get(f"{DEBEZIUM_CONNECTOR_URL}/connectors/yugabyte-cdc-compatibility-test/status") as status_response:
+                            if status_response.status == 200:
+                                status_data = await status_response.json()
+                                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                                tasks = status_data.get('tasks', [])
+                                
+                                logger.info(f"🔍 Check {i+1}/6: Connector state: {connector_state}")
+                                
+                                for j, task in enumerate(tasks):
+                                    task_state = task.get('state', 'UNKNOWN')
+                                    logger.info(f"🔍 Check {i+1}/6: Task {j} state: {task_state}")
+                                    
+                                    if task_state == 'FAILED':
+                                        task_trace = task.get('trace', '')
+                                        logger.error(f"❌ Task failure detected!")
+                                        logger.error(f"Task trace: {task_trace}")
+                                        
+                                        # Check for our target error
+                                        if ("nullpointerexception" in task_trace.lower() and 
+                                            ("beforeimage" in task_trace.lower() or "isbeforeimageenabled" in task_trace.lower())):
+                                            logger.error("🚨 CONFIRMED: NullPointerException in isBeforeImageEnabled detected!")
+                                            logger.error("🚨 This indicates YugabyteDB/Debezium version incompatibility")
+                                            raise Exception("CDC compatibility test failed - version incompatibility detected")
+                                        
+                                        elif "yb-admin stream" in task_trace.lower():
+                                            logger.error("🚨 CONFIRMED: yb-admin stream conflict detected!")
+                                            logger.error("🚨 This indicates existing CDC streams conflicting")
+                                            raise Exception("CDC compatibility test failed - stream conflicts detected")
+                                
+                                if connector_state == 'RUNNING' and all(t.get('state') != 'FAILED' for t in tasks):
+                                    logger.info("✅ Connector is healthy and running!")
+                                    break
+                            else:
+                                logger.warning(f"⚠️ Could not get connector status (HTTP {status_response.status})")
+                    
+                    # Step 4: Test data insertion
+                    logger.info("🧪 Step 4: Testing CDC with data insertion...")
+                    
+                    conn = await asyncpg.connect(DATABASE_URL)
+                    try:
+                        await conn.execute("""
+                            INSERT INTO public.cdc_test_simple (name, test_value) 
+                            VALUES ('test_cdc', 999);
+                        """)
+                        logger.info("✅ Test data inserted successfully")
+                    finally:
+                        await conn.close()
+                    
+                    logger.info("✅ CDC COMPATIBILITY TEST PASSED!")
+                    logger.info("✅ YugabyteDB and Debezium appear to be compatible")
+                    logger.info("✅ The issue may be with specific table configurations or complex schemas")
+                    
+                else:
+                    logger.error(f"❌ Failed to create CDC connector: HTTP {response.status}")
+                    logger.error(f"Response: {response_text}")
+                    
+                    # Check for specific error patterns
+                    if ("nullpointerexception" in response_text.lower() and 
+                        ("beforeimage" in response_text.lower() or "isbeforeimageenabled" in response_text.lower())):
+                        logger.error("🚨 CONFIRMED: NullPointerException in isBeforeImageEnabled in HTTP response!")
+                        logger.error("🚨 This indicates YugabyteDB/Debezium version incompatibility")
+                        raise Exception("CDC compatibility test failed - version incompatibility in HTTP response")
+                    
+                    raise Exception(f"CDC compatibility test failed - HTTP {response.status}")
+        
+        # Cleanup
+        logger.info("🧹 Cleaning up test connector...")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.delete(f"{DEBEZIUM_CONNECTOR_URL}/connectors/yugabyte-cdc-compatibility-test") as response:
+                    if response.status in [200, 204]:
+                        logger.info("🧹 Test connector deleted successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete test connector: {e}")
+        
+        logger.info("🧪" + "=" * 60)
+        logger.info("🧪 CDC COMPATIBILITY TEST COMPLETED SUCCESSFULLY")
+        logger.info("🧪" + "=" * 60)
+        
+    except Exception as e:
+        logger.error("🧪" + "=" * 60)
+        logger.error("🧪 CDC COMPATIBILITY TEST FAILED")
+        logger.error(f"🧪 Error: {e}")
+        logger.error("🧪" + "=" * 60)
+        
+        # Provide recommendations based on the error
+        error_str = str(e).lower()
+        if "nullpointerexception" in error_str and ("beforeimage" in error_str or "isbeforeimageenabled" in error_str):
+            logger.error("🚨 DIAGNOSIS: YugabyteDB/Debezium version incompatibility")
+            logger.error("🚨 RECOMMENDATION: Try different YugabyteDB or Debezium connector version")
+            logger.error("🚨 ALTERNATIVE: Switch to PostgreSQL or different CDC approach")
+        elif "yb-admin stream" in error_str:
+            logger.error("🚨 DIAGNOSIS: CDC stream conflicts")
+            logger.error("🚨 RECOMMENDATION: YugabyteDB cluster redeploy needed")
+        elif "connection" in error_str or "timeout" in error_str:
+            logger.error("🚨 DIAGNOSIS: Connectivity issues")
+            logger.error("🚨 RECOMMENDATION: Check YugabyteDB and Debezium service availability")
+        else:
+            logger.error("🚨 DIAGNOSIS: Unknown CDC configuration issue")
+            logger.error("🚨 RECOMMENDATION: Check YugabyteDB logs and connector configuration")
+        
+        # Don't exit - continue with normal application flow
+        logger.warning("⚠️ Continuing with normal application startup despite test failure...")
+
 async def main():
     """Main application loop"""
     logger.info("=" * 60)
@@ -1384,6 +1589,13 @@ async def main():
     logger.info(f"  Scan Interval: {SCAN_INTERVAL_SECONDS}s")
     logger.info(f"  Log Level: {LOG_LEVEL}")
     logger.info(f"  CDC Cleanup on Startup: {CLEANUP_CDC_ON_STARTUP}")
+    logger.info(f"  CDC Test Mode: {CDC_TEST_MODE}")
+    
+    # Run CDC compatibility test if enabled
+    if CDC_TEST_MODE:
+        logger.info("🧪 CDC_TEST_MODE enabled - running compatibility test first...")
+        await run_cdc_compatibility_test()
+        logger.info("🧪 CDC compatibility test completed, continuing with normal startup...")
     
     # Validate required environment variables
     if not BIGQUERY_PROJECT_ID:
