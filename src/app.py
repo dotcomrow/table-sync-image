@@ -1933,7 +1933,25 @@ async def main():
             # Import and run the end-to-end test
             import sys
             import os
-            test_components_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'test_components')
+            
+            # In Docker container, test_components is in /app/test_components
+            # Try multiple possible paths
+            possible_paths = [
+                '/app/test_components',  # Docker container path
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), 'test_components'),  # Local development
+                os.path.join(os.getcwd(), 'test_components'),  # Current working directory
+            ]
+            
+            test_components_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    test_components_path = path
+                    break
+            
+            if not test_components_path:
+                raise ImportError(f"Could not find test_components directory. Tried: {possible_paths}")
+            
+            logger.info(f"Using test_components path: {test_components_path}")
             sys.path.insert(0, test_components_path)
             
             # Import the E2E test class
@@ -1949,8 +1967,22 @@ async def main():
             else:
                 logger.error("❌ End-to-end test FAILED - exiting")
                 raise SystemExit(1)
-        except ImportError:
-            logger.error("❌ Could not import end-to-end test - check test_components directory")
+        except ImportError as e:
+            logger.error(f"❌ Could not import end-to-end test: {e}")
+            logger.error("Debug info:")
+            logger.error(f"  Current working directory: {os.getcwd()}")
+            logger.error(f"  __file__ location: {__file__}")
+            logger.error(f"  sys.path: {sys.path[:3]}...")  # Show first few entries
+            
+            # List contents of potential directories
+            for path in ['/app', '/app/test_components', os.getcwd()]:
+                if os.path.exists(path):
+                    try:
+                        contents = os.listdir(path)
+                        logger.error(f"  Contents of {path}: {contents[:10]}")  # Show first 10 items
+                    except Exception as list_error:
+                        logger.error(f"  Could not list {path}: {list_error}")
+            
             raise SystemExit(1)
         except Exception as e:
             logger.error(f"❌ End-to-end test error: {e}")
