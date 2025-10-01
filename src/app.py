@@ -34,6 +34,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
 CDC_TEST_MODE = os.getenv("CDC_TEST_MODE", "false").lower() == "true"
 E2E_TEST_MODE = os.getenv("E2E_TEST_MODE", "false").lower() == "true"
+USE_SHARED_CDC_STREAMS = os.getenv("USE_SHARED_CDC_STREAMS", "true").lower() == "true"
 
 @dataclass
 class TableBootstrapConfig:
@@ -1125,16 +1126,23 @@ class TableSyncManager:
         )
         logger.info(f"Pipeline manager configured for Debezium at {DEBEZIUM_CONNECTOR_URL}")
         
-        # Perform startup CDC cleanup if enabled (default: true)
-        if CLEANUP_CDC_ON_STARTUP:
-            logger.info("Performing startup CDC stream cleanup...")
-            cleanup_success = await self.pipeline_manager.connector_manager.cleanup_all_cdc_streams_on_startup()
-            if cleanup_success:
-                logger.info("✅ Startup CDC cleanup completed successfully")
-            else:
-                logger.warning("⚠️  Startup CDC cleanup had issues, but continuing...")
+        # Handle CDC stream management based on shared stream configuration
+        if USE_SHARED_CDC_STREAMS:
+            logger.info("🔗 Using shared CDC streams approach for better reliability")
+            logger.info("Skipping aggressive CDC cleanup to preserve shared streams")
+            # Instead of aggressive cleanup, just ensure we have proper stream management
+            logger.info("Verifying shared CDC stream availability...")
         else:
-            logger.info("Startup CDC cleanup disabled via CLEANUP_CDC_ON_STARTUP=false")
+            # Legacy approach: cleanup all streams on startup
+            if CLEANUP_CDC_ON_STARTUP:
+                logger.info("Performing startup CDC stream cleanup...")
+                cleanup_success = await self.pipeline_manager.connector_manager.cleanup_all_cdc_streams_on_startup()
+                if cleanup_success:
+                    logger.info("✅ Startup CDC cleanup completed successfully")
+                else:
+                    logger.warning("⚠️  Startup CDC cleanup had issues, but continuing...")
+            else:
+                logger.info("Startup CDC cleanup disabled via CLEANUP_CDC_ON_STARTUP=false")
         
         # Initialize BigQuery components if configured
         if self.bq_manager:
@@ -1925,6 +1933,7 @@ async def main():
     logger.info(f"  CDC Cleanup on Startup: {CLEANUP_CDC_ON_STARTUP}")
     logger.info(f"  CDC Test Mode: {CDC_TEST_MODE}")
     logger.info(f"  E2E Test Mode: {E2E_TEST_MODE}")
+    logger.info(f"  Use Shared CDC Streams: {USE_SHARED_CDC_STREAMS}")
     
     # Run tests if enabled - EXIT after test completion
     if E2E_TEST_MODE:

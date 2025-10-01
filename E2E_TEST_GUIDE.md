@@ -37,6 +37,9 @@ DATABASE_URL=postgresql://yugabyte@yb-tserver-service.yugabyte.svc.cluster.local
 DEBEZIUM_CONNECTOR_URL=http://kafka-connect.kafka.svc.internal.lan:8083
 YUGABYTE_MASTER_ADDRESSES=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
 
+# ⚠️  IMPORTANT: Make sure YUGABYTE_MASTER_ADDRESSES is set in your deployment!
+# If not set, it will default to database.hostname:7100 which may not work
+
 # Additional for E2E test
 GOOGLE_CLOUD_PROJECT=your-project-id
 BIGQUERY_DATASET=cdc_test_dataset  
