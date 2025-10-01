@@ -9,6 +9,7 @@ import json
 import os
 import asyncpg
 import time
+import hashlib
 from urllib.parse import urlparse
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -191,8 +192,9 @@ class EndToEndCDCTest:
                 "snapshot.mode": "never",  # We handle initial data separately
                 "database.stream.prefix": f"yugabyte_public_{self.test_table}",
                 
-                # Force creation of new dedicated CDC stream for E2E test
-                "database.streamid": f"e2e_test_stream_{int(time.time())}",  # Unique stream ID
+                # Force creation of new dedicated CDC stream for E2E test - 32 char hex format
+                # Generate proper 32-character hex stream ID for YugabyteDB
+                "database.streamid": hashlib.md5(f"e2e_test_{int(time.time())}".encode()).hexdigest(),
                 
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
