@@ -460,7 +460,8 @@ class DebeziumConnectorManager:
             "provide.transaction.metadata": "false",
             "binary.handling.mode": "base64",
             "publication.autocreate.mode": "all_tables",
-            "before.image.mode": "off",
+            "yugabytedb.beforeimage.enable": "false",
+            "beforeimage.enable": "false",
             
             # Error handling
             "errors.tolerance": "all",
