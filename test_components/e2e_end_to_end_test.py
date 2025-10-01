@@ -77,12 +77,12 @@ class EndToEndCDCTest:
         """Get or use existing CDC stream for the test table"""
         print(f"🔄 Using existing CDC stream for database {database_name}...")
         
-        # For now, use the manually created CDC stream ID for yugabyte database
-        # This is a temporary solution until we can properly integrate kubectl in the container
-        # Stream created with: yb-admin create_change_data_stream ysql.yugabyte
-        existing_stream_id = "b71ee84b035b35a9c04b674294fbb3ce"
+        # Use the ACTIVE CDC stream ID from the cluster
+        # Stream e0bb07f447bcd9af954fbe430ac11805 is currently ACTIVE with replication slot 'debezium'
+        # This is a shared stream that can handle multiple tables
+        existing_stream_id = "e0bb07f447bcd9af954fbe430ac11805"
         
-        print(f"✅ Using pre-existing CDC stream for {database_name}: {existing_stream_id}")
+        print(f"✅ Using active shared CDC stream for {database_name}: {existing_stream_id}")
         return existing_stream_id
 
     async def create_yugabyte_test_table(self):

@@ -481,20 +481,34 @@ class DebeziumConnectorManager:
                 )
                 
                 if result.returncode == 0:
-                    # For now, use the first available stream (shared approach)
-                    # In our E2E test, we used stream: b71ee84b035b35a9c04b674294fbb3ce
-                    lines = result.stdout.strip().split('\n')
+                    # Parse CDC stream output to find ACTIVE streams only
+                    output = result.stdout.strip()
+                    streams = []
+                    current_stream = {}
                     
-                    for line in lines:
-                        if 'stream_id' in line.lower():
-                            parts = line.split()
-                            for i, part in enumerate(parts):
-                                if 'stream_id' in part.lower() and i + 1 < len(parts):
-                                    stream_id = parts[i + 1].strip(':')
-                                    logger.info(f"Found existing CDC stream: {stream_id}")
-                                    return stream_id
+                    for line in output.split('\n'):
+                        line = line.strip()
+                        if line.startswith('stream_id:'):
+                            if current_stream:
+                                streams.append(current_stream)
+                            current_stream = {'stream_id': line.split(':', 1)[1].strip().strip('"')}
+                        elif 'value: "ACTIVE"' in line and current_stream:
+                            current_stream['active'] = True
+                        elif line.startswith('streams {') or not line:
+                            continue
                     
-                    logger.info(f"No existing CDC streams found")
+                    # Add the last stream
+                    if current_stream:
+                        streams.append(current_stream)
+                    
+                    # Find first ACTIVE stream
+                    for stream in streams:
+                        if stream.get('active', False):
+                            stream_id = stream['stream_id']
+                            logger.info(f"Found ACTIVE CDC stream: {stream_id}")
+                            return stream_id
+                    
+                    logger.info(f"No ACTIVE CDC streams found")
                     return None
                 else:
                     logger.warning(f"Could not list CDC streams: {result.stderr}")
