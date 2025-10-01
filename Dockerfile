@@ -35,6 +35,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source
 COPY src/ .
+
+# Copy test components for E2E testing
+COPY test_components/ test_components/
+
 ENV PYTHONPATH=/app
 
 # Install Python-based yb-admin wrapper

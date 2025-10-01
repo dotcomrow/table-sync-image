@@ -33,6 +33,7 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
 CDC_TEST_MODE = os.getenv("CDC_TEST_MODE", "false").lower() == "true"
+E2E_TEST_MODE = os.getenv("E2E_TEST_MODE", "false").lower() == "true"
 
 @dataclass
 class TableBootstrapConfig:
@@ -1923,12 +1924,47 @@ async def main():
     logger.info(f"  Log Level: {LOG_LEVEL}")
     logger.info(f"  CDC Cleanup on Startup: {CLEANUP_CDC_ON_STARTUP}")
     logger.info(f"  CDC Test Mode: {CDC_TEST_MODE}")
+    logger.info(f"  E2E Test Mode: {E2E_TEST_MODE}")
     
-    # Run CDC compatibility test if enabled
-    if CDC_TEST_MODE:
-        logger.info("🧪 CDC_TEST_MODE enabled - running compatibility test first...")
-        await run_cdc_compatibility_test()
-        logger.info("🧪 CDC compatibility test completed, continuing with normal startup...")
+    # Run tests if enabled - EXIT after test completion
+    if E2E_TEST_MODE:
+        logger.info("🚀 E2E_TEST_MODE enabled - running complete end-to-end test...")
+        try:
+            # Import and run the end-to-end test
+            import sys
+            import os
+            test_components_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'test_components')
+            sys.path.insert(0, test_components_path)
+            
+            # Import the E2E test class
+            from e2e_end_to_end_test import EndToEndCDCTest
+            
+            # Run the test
+            test = EndToEndCDCTest()
+            success = await test.run_full_test()
+            
+            if success:
+                logger.info("🎉 End-to-end test PASSED - exiting")
+                return
+            else:
+                logger.error("❌ End-to-end test FAILED - exiting")
+                raise SystemExit(1)
+        except ImportError:
+            logger.error("❌ Could not import end-to-end test - check test_components directory")
+            raise SystemExit(1)
+        except Exception as e:
+            logger.error(f"❌ End-to-end test error: {e}")
+            raise SystemExit(1)
+    
+    elif CDC_TEST_MODE:
+        logger.info("🧪 CDC_TEST_MODE enabled - running compatibility test...")
+        try:
+            await run_cdc_compatibility_test()
+            logger.info("🧪 CDC compatibility test completed - exiting")
+            return
+        except Exception as e:
+            logger.error(f"❌ CDC compatibility test failed: {e}")
+            raise SystemExit(1)
     
     # Validate required environment variables
     if not BIGQUERY_PROJECT_ID:
