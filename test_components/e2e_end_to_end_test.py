@@ -10,6 +10,8 @@ import os
 import asyncpg
 import time
 import hashlib
+import subprocess
+import re
 from urllib.parse import urlparse
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -64,6 +66,65 @@ class EndToEndCDCTest:
         except Exception as e:
             print(f"❌ Failed to initialize BigQuery client: {e}")
             self.bq_client = None
+
+    def extract_stream_id(self, text: str) -> str:
+        """Extract 32-character hex stream ID from yb-admin output"""
+        pattern = r'[0-9a-fA-F]{32}'
+        matches = re.findall(pattern, text)
+        return matches[0].lower() if matches else None
+
+    async def create_cdc_stream(self, database_name: str = "yugabyte", schema_name: str = "public", table_name: str = None) -> str:
+        """Create CDC stream for the test table using yb-admin"""
+        print(f"🔄 Creating CDC stream for table {schema_name}.{table_name or self.test_table}...")
+        
+        table_to_use = table_name or self.test_table
+        table_identifier = f"{database_name}.{schema_name}.{table_to_use}"
+        
+        try:
+            # First try to create table-specific CDC stream
+            result = subprocess.run([
+                'yb-admin', '--master_addresses', self.master_addresses,
+                'create_change_data_stream', f'ysql.{database_name}.{schema_name}.{table_to_use}'
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                stream_id = self.extract_stream_id(result.stdout)
+                if stream_id:
+                    print(f"✅ Created table-specific CDC stream for {table_identifier}: {stream_id}")
+                    return stream_id
+            
+            # If table-specific fails, try database-level stream
+            print(f"⚠️  Table-specific stream creation failed, trying database-level stream...")
+            result = subprocess.run([
+                'yb-admin', '--master_addresses', self.master_addresses,
+                'create_change_data_stream', f'ysql.{database_name}'
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                stream_id = self.extract_stream_id(result.stdout)
+                if stream_id:
+                    print(f"✅ Created database-level CDC stream for {database_name}: {stream_id}")
+                    return stream_id
+            elif "already has replication slot" in result.stderr.lower():
+                # Stream exists, try to find it
+                print(f"🔍 Database {database_name} already has replication slot, finding existing stream...")
+                result = subprocess.run([
+                    'yb-admin', '--master_addresses', self.master_addresses,
+                    '--include_db_streams=true', 'list_change_data_streams', f'ysql.{database_name}'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    stream_id = self.extract_stream_id(result.stdout)
+                    if stream_id:
+                        print(f"✅ Found existing CDC stream for {database_name}: {stream_id}")
+                        return stream_id
+            
+            print(f"❌ Failed to create CDC stream: {result.stderr}")
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error creating CDC stream: {e}")
+            return None
 
     async def create_yugabyte_test_table(self):
         """Create test table in YugabyteDB"""
@@ -169,6 +230,15 @@ class EndToEndCDCTest:
         """Create Debezium connector with BigQuery sink configuration"""
         print("🔌 Creating end-to-end Debezium connector...")
         
+        # First, create the CDC stream in YugabyteDB
+        stream_id = await self.create_cdc_stream("yugabyte", "public", self.test_table)
+        if not stream_id:
+            print("❌ Failed to create CDC stream - cannot proceed with connector")
+            return False
+        
+        # Store stream ID for cleanup
+        self.stream_id = stream_id
+        
         parsed = urlparse(self.database_url)
         
         # Full connector configuration including BigQuery sink transforms
@@ -192,9 +262,8 @@ class EndToEndCDCTest:
                 "snapshot.mode": "never",  # We handle initial data separately
                 "database.stream.prefix": f"yugabyte_public_{self.test_table}",
                 
-                # Force creation of new dedicated CDC stream for E2E test - 32 char hex format
-                # Generate proper 32-character hex stream ID for YugabyteDB
-                "database.streamid": hashlib.md5(f"e2e_test_{int(time.time())}".encode()).hexdigest(),
+                # Use the actual CDC stream ID created in YugabyteDB
+                "database.streamid": stream_id,
                 
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -453,6 +522,21 @@ class EndToEndCDCTest:
             await conn.execute(f"DROP TABLE IF EXISTS public.{self.test_table} CASCADE")
             await conn.close()
             print("✅ Removed YugabyteDB test table")
+            
+            # Clean up CDC stream if we created one
+            if hasattr(self, 'stream_id') and self.stream_id:
+                try:
+                    result = subprocess.run([
+                        'yb-admin', '--master_addresses', self.master_addresses,
+                        'delete_change_data_stream', self.stream_id
+                    ], capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0:
+                        print(f"✅ Removed CDC stream: {self.stream_id}")
+                    else:
+                        print(f"⚠️  Failed to remove CDC stream: {result.stderr}")
+                except Exception as e:
+                    print(f"⚠️  Error removing CDC stream: {e}")
             
         except Exception as e:
             print(f"⚠️  Cleanup error: {e}")
