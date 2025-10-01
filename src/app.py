@@ -12,15 +12,16 @@ import psycopg
 import asyncpg
 from google.cloud import bigquery
 from google.auth import default
-from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 import sqlparse
 from aiohttp import web, web_response
 import aiohttp
 
-# Application version - update this when making significant changes
-APP_VERSION = "v2.4.0-simplified-config"
-BUILD_DATE = "2025-09-30"
+# Dynamic version detection
+from version_utils import APP_VERSION, BUILD_INFO, get_version_info
+
+# Configure logging with version information
+from logging_config import logger
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
@@ -32,14 +33,6 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
 CDC_TEST_MODE = os.getenv("CDC_TEST_MODE", "false").lower() == "true"
-
-# Configure logging
-logger.remove()
-logger.add(
-    lambda msg: print(msg, end=""),
-    level=LOG_LEVEL,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-)
 
 @dataclass
 class TableBootstrapConfig:
@@ -1916,7 +1909,9 @@ async def main():
     """Main application loop"""
     logger.info("=" * 60)
     logger.info("STARTING TABLE SYNC APPLICATION")
-    logger.info(f"Version: {APP_VERSION} (Built: {BUILD_DATE})")
+    version_info = get_version_info()
+    logger.info(f"Version: {APP_VERSION} (Build: {BUILD_INFO})")
+    logger.info(f"🔍 Version details: {version_info}")
     logger.info("=" * 60)
     
     # Log configuration

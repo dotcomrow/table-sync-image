@@ -5,11 +5,13 @@ import asyncio
 import json
 import aiohttp
 from typing import Dict, Optional
-from loguru import logger
 import os
 
-# Version information (should match app.py)
-DEBEZIUM_MANAGER_VERSION = "v2.4.0-simplified-config"
+# Configure logging with version information
+from logging_config import logger
+
+# Dynamic version detection
+from version_utils import APP_VERSION as DEBEZIUM_MANAGER_VERSION
 
 class DebeziumConnectorManager:
     def __init__(self, connector_url: str):
@@ -441,6 +443,7 @@ class DebeziumConnectorManager:
             
             # YugabyteDB specific settings - use provided stream ID for reuse
             "snapshot.mode": "never",  # We handle initial data separately
+            "database.stream.prefix": f"{database_name}_{schema_name}_{table_name}",
             
             # Try without transforms first to see if connector works
             # Key and value converters
@@ -452,6 +455,11 @@ class DebeziumConnectorManager:
             # YugabyteDB CDC specific settings
             "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
             "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
+            
+            # Fix for before image NullPointerException
+            "provide.transaction.metadata": "false",
+            "binary.handling.mode": "base64",
+            "publication.autocreate.mode": "disabled",
             
             # Error handling
             "errors.tolerance": "all",
