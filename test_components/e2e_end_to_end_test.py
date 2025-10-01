@@ -17,7 +17,14 @@ class EndToEndCDCTest:
     def __init__(self):
         self.connect_url = os.getenv("DEBEZIUM_CONNECTOR_URL", "http://localhost:8083")
         self.database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
-        self.master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES", "localhost:7100")
+        
+        # Get master addresses with same fallback logic as debezium_manager.py
+        parsed_db = urlparse(self.database_url)
+        self.master_addresses = (
+            os.getenv("YUGABYTE_MASTER_ADDRESSES") or 
+            os.getenv("DEBEZIUM_MASTER_ADDRESSES") or 
+            f"{parsed_db.hostname}:7100"
+        )
         # Use same environment variables as main app
         self.bq_project = os.getenv("BIGQUERY_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
         self.bq_dataset = os.getenv("BIGQUERY_DATASET", "cdc_test_dataset")
@@ -62,7 +69,10 @@ class EndToEndCDCTest:
         print("📊 Creating YugabyteDB test table...")
         
         try:
-            conn = await asyncpg.connect(self.database_url)
+            # Connect to yugabyte database instead of kafka to avoid CDC stream conflicts
+            yugabyte_url = self.database_url.rsplit('/', 1)[0] + '/yugabyte'
+            print(f"🔍 Connecting to yugabyte database: {yugabyte_url}")
+            conn = await asyncpg.connect(yugabyte_url)
             
             # Drop and recreate test table
             await conn.execute(f"""
@@ -172,20 +182,32 @@ class EndToEndCDCTest:
                 "database.port": str(parsed.port),
                 "database.user": parsed.username or "yugabyte",
                 "database.password": parsed.password or "",
-                "database.dbname": parsed.path.lstrip('/'),
+                "database.dbname": "yugabyte",  # Use yugabyte database instead of kafka to avoid conflicts
                 "database.server.name": "e2e-test-server",
                 "table.include.list": f"public.{self.test_table}",
                 "database.master.addresses": self.master_addresses,
                 
-                # Simplified configuration (bash-style approach)
-                "before.image.mode": "never",
-                "snapshot.mode": "initial",  # Start with initial snapshot
+                # YugabyteDB specific settings - match working debezium_manager.py exactly
+                "snapshot.mode": "never",  # We handle initial data separately
+                "database.stream.prefix": f"yugabyte_public_{self.test_table}",
+                
+                # Force creation of new dedicated CDC stream for E2E test
+                "database.streamid": f"e2e_test_stream_{int(time.time())}",  # Unique stream ID
                 
                 # Key and value converters
                 "key.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "value.converter": "org.apache.kafka.connect.json.JsonConverter", 
                 "key.converter.schemas.enable": "false",
                 "value.converter.schemas.enable": "false",
+                
+                # YugabyteDB CDC specific settings (from working config)
+                "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
+                "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
+                
+                # Fix for before image NullPointerException - use bash implementation approach
+                "provide.transaction.metadata": "false",
+                "binary.handling.mode": "base64",
+                "before.image.mode": "never",
                 
                 # Transforms for BigQuery compatibility
                 "transforms": "unwrap,addTopicPrefix",
@@ -298,8 +320,9 @@ class EndToEndCDCTest:
         print("📝 Adding new test data to trigger CDC...")
         
         try:
-            # Add new rows to YugabyteDB
-            conn = await asyncpg.connect(self.database_url)
+            # Add new rows to YugabyteDB (connect to yugabyte database)
+            yugabyte_url = self.database_url.rsplit('/', 1)[0] + '/yugabyte'
+            conn = await asyncpg.connect(yugabyte_url)
             
             new_rows = [
                 ('David Wilson', 'david@example.com', 29),
@@ -422,8 +445,9 @@ class EndToEndCDCTest:
                 except:
                     pass
             
-            # Clean up YugabyteDB table
-            conn = await asyncpg.connect(self.database_url)
+            # Clean up YugabyteDB table (connect to yugabyte database)
+            yugabyte_url = self.database_url.rsplit('/', 1)[0] + '/yugabyte'
+            conn = await asyncpg.connect(yugabyte_url)
             await conn.execute(f"DROP TABLE IF EXISTS public.{self.test_table} CASCADE")
             await conn.close()
             print("✅ Removed YugabyteDB test table")
@@ -444,6 +468,7 @@ class EndToEndCDCTest:
             "DATABASE_URL": self.database_url,
             "DEBEZIUM_CONNECTOR_URL": self.connect_url,
             "BigQuery Project": self.bq_project,
+            "Master Addresses": self.master_addresses,
         }
         
         missing_vars = []
