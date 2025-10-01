@@ -606,9 +606,9 @@ class DebeziumConnectorManager:
             "errors.log.include.messages": "true"
         }
         
-        # Configure CDC stream ID based on approach
+        # Configure CDC stream based on approach
         if self.use_shared_cdc_streams and shared_stream_id:
-            # SHARED CDC STREAM: Use the shared stream ID
+            # SHARED CDC STREAM: Use stream ID that includes the target table
             config_dict.update({
                 "database.stream.id": shared_stream_id,
                 "database.streamid": shared_stream_id,

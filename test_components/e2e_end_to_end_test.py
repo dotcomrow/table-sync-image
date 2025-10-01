@@ -75,14 +75,14 @@ class EndToEndCDCTest:
 
     async def create_cdc_stream(self, database_name: str = "yugabyte", schema_name: str = "public", table_name: str = None) -> str:
         """Get or use existing CDC stream for the test table"""
-        print(f"🔄 Using existing CDC stream for database {database_name}...")
+        print(f"🔄 Using CDC stream for database {database_name}...")
         
-        # Use the ACTIVE CDC stream ID from the cluster
-        # Stream e0bb07f447bcd9af954fbe430ac11805 is currently ACTIVE with replication slot 'debezium'
-        # This is a shared stream that can handle multiple tables
-        existing_stream_id = "e0bb07f447bcd9af954fbe430ac11805"
+        # Use the working CDC stream ID that includes our table
+        # Stream f65a3dea2038f2bb8f4568fde769432c was created specifically for yugabyte database
+        # and includes the e2e_cdc_test table
+        existing_stream_id = "f65a3dea2038f2bb8f4568fde769432c"
         
-        print(f"✅ Using active shared CDC stream for {database_name}: {existing_stream_id}")
+        print(f"✅ Using CDC stream that includes our table: {existing_stream_id}")
         return existing_stream_id
 
     async def create_yugabyte_test_table(self):
@@ -221,7 +221,7 @@ class EndToEndCDCTest:
                 "snapshot.mode": "never",  # We handle initial data separately
                 "database.stream.prefix": f"yugabyte_public_{self.test_table}",
                 
-                # Use the actual CDC stream ID created in YugabyteDB
+                # Use the actual CDC stream ID that includes our table
                 "database.streamid": stream_id,
                 
                 # Key and value converters
