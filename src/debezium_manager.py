@@ -460,6 +460,7 @@ class DebeziumConnectorManager:
             "provide.transaction.metadata": "false",
             "binary.handling.mode": "base64",
             "publication.autocreate.mode": "all_tables",
+            "before.image.mode": "off",
             
             # Error handling
             "errors.tolerance": "all",
