@@ -18,7 +18,8 @@ class EndToEndCDCTest:
         self.connect_url = os.getenv("DEBEZIUM_CONNECTOR_URL", "http://localhost:8083")
         self.database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
         self.master_addresses = os.getenv("YUGABYTE_MASTER_ADDRESSES", "localhost:7100")
-        self.bq_project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        # Use same environment variables as main app
+        self.bq_project = os.getenv("BIGQUERY_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
         self.bq_dataset = os.getenv("BIGQUERY_DATASET", "cdc_test_dataset")
         self.test_table = "e2e_cdc_test"
         self.bq_table = f"{self.bq_dataset}.{self.test_table}"
@@ -30,15 +31,28 @@ class EndToEndCDCTest:
         
     def _init_bigquery_client(self):
         """Initialize BigQuery client with service account"""
+        if not self.bq_project:
+            print(f"❌ No BigQuery project ID found. Checked:")
+            print(f"   BIGQUERY_PROJECT_ID: {os.getenv('BIGQUERY_PROJECT_ID')}")
+            print(f"   GOOGLE_CLOUD_PROJECT: {os.getenv('GOOGLE_CLOUD_PROJECT')}")
+            self.bq_client = None
+            return
+            
         try:
             service_account_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if service_account_path:
+            print(f"🔍 Initializing BigQuery for project: {self.bq_project}")
+            print(f"🔍 Service account path: {service_account_path}")
+            
+            if service_account_path and os.path.exists(service_account_path):
                 credentials = service_account.Credentials.from_service_account_file(service_account_path)
                 self.bq_client = bigquery.Client(credentials=credentials, project=self.bq_project)
+                print(f"✅ BigQuery client initialized with service account")
             else:
                 # Try default credentials
                 self.bq_client = bigquery.Client(project=self.bq_project)
-            print(f"✅ BigQuery client initialized for project: {self.bq_project}")
+                print(f"✅ BigQuery client initialized with default credentials")
+                
+            print(f"✅ BigQuery client ready for project: {self.bq_project}")
         except Exception as e:
             print(f"❌ Failed to initialize BigQuery client: {e}")
             self.bq_client = None
@@ -423,6 +437,35 @@ class EndToEndCDCTest:
         print("🚀 END-TO-END CDC PIPELINE TEST")
         print("🚀 YugabyteDB → Debezium → Kafka → BigQuery")
         print("🚀" + "="*60)
+        
+        # Validate required environment variables
+        print("🔍 Validating environment configuration...")
+        required_vars = {
+            "DATABASE_URL": self.database_url,
+            "DEBEZIUM_CONNECTOR_URL": self.connect_url,
+            "BigQuery Project": self.bq_project,
+        }
+        
+        missing_vars = []
+        for var_name, var_value in required_vars.items():
+            if not var_value:
+                missing_vars.append(var_name)
+            else:
+                print(f"✅ {var_name}: {var_value}")
+        
+        if missing_vars:
+            print(f"❌ Missing required environment variables: {missing_vars}")
+            print("💡 Make sure you have set:")
+            print("   - BIGQUERY_PROJECT_ID (or GOOGLE_CLOUD_PROJECT)")
+            print("   - DATABASE_URL")
+            print("   - DEBEZIUM_CONNECTOR_URL")
+            return False
+        
+        if not self.bq_client:
+            print("❌ BigQuery client initialization failed - cannot proceed")
+            return False
+        
+        print("✅ Environment validation passed")
         
         success = False
         
