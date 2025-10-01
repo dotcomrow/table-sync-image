@@ -459,7 +459,7 @@ class DebeziumConnectorManager:
             # Fix for before image NullPointerException
             "provide.transaction.metadata": "false",
             "binary.handling.mode": "base64",
-            "publication.autocreate.mode": "disabled",
+            "publication.autocreate.mode": "all_tables",
             
             # Error handling
             "errors.tolerance": "all",
