@@ -17,6 +17,13 @@ jobs:
         id: set-tag
         run: echo "tag=ts-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
+      - name: Set version info
+        id: version-info
+        run: |
+          echo "build_timestamp=$(date -u +%Y-%m-%d_%H:%M:%S_UTC)" >> "$GITHUB_OUTPUT"
+          echo "git_tag=$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo 'no-tag')" >> "$GITHUB_OUTPUT"
+          echo "git_commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Compute image coords
         id: meta
         run: |
@@ -41,4 +48,8 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }}
+          build-args: |
+            BUILD_TIMESTAMP=${{ steps.version-info.outputs.build_timestamp }}
+            GIT_TAG=${{ steps.version-info.outputs.git_tag }}
+            GIT_COMMIT=${{ steps.version-info.outputs.git_commit }}
           provenance: false   # set true if your org requires SBOM/provenance
