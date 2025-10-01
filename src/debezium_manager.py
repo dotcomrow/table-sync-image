@@ -456,12 +456,14 @@ class DebeziumConnectorManager:
             "cdcsdk.snapshot.txn.timeout": "900000",  # 15 minutes timeout
             "cdcsdk.connection.timeout": "10000",     # 10 seconds connection timeout
             
-            # Fix for before image NullPointerException
+            # Fix for before image NullPointerException - use bash implementation approach
             "provide.transaction.metadata": "false",
             "binary.handling.mode": "base64",
-            "publication.autocreate.mode": "all_tables",
-            "yugabytedb.beforeimage.enable": "false",
-            "beforeimage.enable": "false",
+            "before.image.mode": "never",
+            # Remove publication autocreation that may cause metadata conflicts
+            # "publication.autocreate.mode": "all_tables",
+            # "yugabytedb.beforeimage.enable": "false", 
+            # "beforeimage.enable": "false",
             
             # Error handling
             "errors.tolerance": "all",
