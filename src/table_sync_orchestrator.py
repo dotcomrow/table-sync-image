@@ -530,86 +530,21 @@ class TableSyncOrchestrator:
         Returns the stream ID as a string, or None if not found.
         """
         try:
-            yb_cfg = self.config.get('yugabytedb', {}) or {}
-            host = yb_cfg.get('host')
-            port = yb_cfg.get('port', 5433)
-            user = yb_cfg.get('user')
-            password = yb_cfg.get('password')
-            # Connect to YugabyteDB
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                user=user,
-                password=password,
-                dbname=database
-            )
-            with conn.cursor() as cur:
-                cur.execute("""
+            with self._get_db_connection_ctx(database) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
                     SELECT stream_id
-                    FROM yb_cdc_stream
-            def _get_cdc_stream_id(self, database: str, schema: str, table: str) -> str:
-                """
-                Fetch the CDC stream ID for a given YugabyteDB table.
-                Returns the stream ID as a string, or None if not found.
-                """
-                try:
-                    yb_cfg = self.config.get('yugabytedb', {}) or {}
-                    host = yb_cfg.get('host')
-                    port = yb_cfg.get('port', 5433)
-                    user = yb_cfg.get('user')
-                    password = yb_cfg.get('password')
-                    # Connect to YugabyteDB
-                    conn = psycopg2.connect(
-                        host=host,
-                        port=port,
-                        user=user,
-                        password=password,
-                        dbname=database
-                    )
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            SELECT stream_id
-                            FROM yb_cdc_stream
-                            WHERE namespace_name = %s AND table_name = %s
-                            """,
-                            (schema, table)
-                        )
-                        row = cur.fetchone()
-                        if row:
-                            return row[0]
-                except Exception as e:
-                    self.logger.error("Failed to fetch CDC stream ID", database=database, schema=schema, table=table, error=str(e))
-                finally:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                return None
-                    "database.user": yb_cfg.get('user'),
-                    "database.password": yb_cfg.get('password'),
-                    "database.dbname": table_info.database,
-                    "database.server.name": f"yugabyte-{table_info.database}",
-                    "database.master.addresses": master_addresses,
-                    "table.include.list": f"{table_info.schema}.{table_info.table}",
-                    "database.streamid": stream_id,
-                    "transforms": "unwrap",
-                    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-                }
-            }
-
-            connect_url = (self.config.get('kafka_connect', {}) or {}).get('url', 'http://kafka-connect:8083')
-            resp = requests.post(f"{connect_url}/connectors", json=connector_config,
-                                 headers={'Content-Type': 'application/json'}, timeout=10)
-            if resp.status_code in (200, 201):
-                self.logger.info("Created CDC connector", connector=connector_name, table=table_info.full_name)
-                return True
-            self.logger.error("Failed to create CDC connector", connector=connector_name,
-                              status_code=resp.status_code, response=resp.text)
-            return False
+                    FROM yb_cdc_streams
+                    WHERE namespace_name = %s AND table_name = %s
+                    """,
+                    (schema, table)
+                )
+                row = cur.fetchone()
+                if row and row[0] and len(row[0]) == 32:
+                    return row[0]
         except Exception as e:
-            self.logger.error("Failed to create CDC connector", table=table_info.full_name, error=str(e))
-            return False
+            self.logger.error("Failed to fetch CDC stream ID", database=database, schema=schema, table=table, error=str(e))
+        return None
 
     # ----------------------------- Scanning / Sync Loop -----------------------------
 
