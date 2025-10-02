@@ -9,7 +9,7 @@ Key points:
 - Adds robust connection options (timeouts, keepalives, application_name)
 - Guards BigQuery ops when client is None
 - Creates/ensures Debezium YugabyteDB gRPC connectors (not PG connector)
-- CDC stream id is taken from annotation or config; optional on-the-fly creation via yb-admin
+- CDC stream id is taken from annotation or config; auto-list/create via yb-admin when master addresses are available (unless explicitly disabled)
 """
 
 import os
@@ -457,10 +457,8 @@ class TableSyncOrchestrator:
         Priority:
           1) annotation.bootstrap.cdc_stream_id
           2) config.yugabytedb.cdc_stream_id
-          3) (optional) yb-admin list/create if enabled via config:
-               yugabytedb.allow_yb_admin: true
-               yugabytedb.yb_admin_path: "yb-admin" (or full path)
-               yugabytedb.master_addresses: "host1:7100,host2:7100,host3:7100"
+          3) yb-admin list/create if master addresses available
+             (auto-enabled unless user explicitly sets allow_yb_admin: false)
         """
         # 1) per-table annotation
         if table_info.annotation and table_info.annotation.cdc_stream_id:
@@ -471,18 +469,28 @@ class TableSyncOrchestrator:
         if yb_cfg.get("cdc_stream_id"):
             return str(yb_cfg["cdc_stream_id"])
 
-        # 3) optional yb-admin path (idempotent: list first, then create)
-        if not yb_cfg.get("allow_yb_admin"):
-            self.logger.warning("yb-admin disabled; no CDC stream id provided", database=table_info.database)
-            return None
-
+        # master addresses from config or env
         master_addrs = (
             yb_cfg.get("master_addresses")
             or yb_cfg.get("masters")
             or yb_cfg.get("database.master.addresses")
+            or os.getenv("YB_MASTER_ADDRESSES")
         )
+
+        # Decide whether yb-admin is allowed:
+        # - If user explicitly sets allow_yb_admin, honor it.
+        # - Otherwise, auto-enable if master addresses are provided.
+        if "allow_yb_admin" in yb_cfg:
+            allow_admin = bool(yb_cfg.get("allow_yb_admin"))
+        else:
+            allow_admin = bool(master_addrs)
+
+        if not allow_admin:
+            self.logger.warning("yb-admin disabled; no CDC stream id provided", database=table_info.database)
+            return None
+
         if not master_addrs:
-            self.logger.error("yb-admin enabled but master_addresses not configured")
+            self.logger.error("yb-admin allowed but master_addresses not configured (config or YB_MASTER_ADDRESSES env)")
             return None
 
         yb_admin_bin = yb_cfg.get("yb_admin_path", "yb-admin")
@@ -492,7 +500,7 @@ class TableSyncOrchestrator:
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
-                text=True, stderr=subprocess.STDOUT, timeout=15
+                text=True, stderr=subprocess.STDOUT, timeout=20
             )
             m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
             if m:
@@ -506,7 +514,7 @@ class TableSyncOrchestrator:
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
-                text=True, stderr=subprocess.STDOUT, timeout=15
+                text=True, stderr=subprocess.STDOUT, timeout=20
             )
             m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
             if m:
@@ -557,6 +565,7 @@ class TableSyncOrchestrator:
         master_addrs = (
             yb.get('database.master.addresses')
             or yb.get('master_addresses')
+            or os.getenv("YB_MASTER_ADDRESSES")
             or f"{host}:7100"
         )
 
