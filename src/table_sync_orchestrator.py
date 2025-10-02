@@ -1,3 +1,19 @@
+    def _get_cdc_stream_id(self, database: str, schema: str, table: str) -> Optional[str]:
+        """Fetch the CDC stream ID for a table from YugabyteDB."""
+        try:
+            with self._get_db_connection_ctx(database) as conn, conn.cursor() as cur:
+                # YugabyteDB stores CDC streams in system tables. This query may need adjustment for your YB version.
+                cur.execute("""
+                    SELECT stream_id
+                    FROM yb_cdc_streams
+                    WHERE namespace_name = %s AND table_name = %s
+                """, (schema, table))
+                row = cur.fetchone()
+                if row and row[0] and len(row[0]) == 32:
+                    return row[0]
+        except Exception as e:
+            self.logger.error("Failed to fetch CDC stream ID", database=database, schema=schema, table=table, error=str(e))
+        return None
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -537,6 +553,12 @@ class TableSyncOrchestrator:
             # Debezium master addresses (Debezium-only; not for psycopg2)
             master_addresses = yb_cfg.get('debezium_master_addresses') or yb_cfg.get('master_addresses', '')
 
+            # Fetch the actual CDC stream ID
+            stream_id = self._get_cdc_stream_id(table_info.database, table_info.schema, table_info.table)
+            if not stream_id:
+                self.logger.error("No valid CDC stream ID found for table", table=table_info.full_name)
+                return False
+
             connector_config = {
                 "name": connector_name,
                 "config": {
@@ -549,7 +571,7 @@ class TableSyncOrchestrator:
                     "database.server.name": f"yugabyte-{table_info.database}",
                     "database.master.addresses": master_addresses,
                     "table.include.list": f"{table_info.schema}.{table_info.table}",
-                    "database.streamid": f"cdcstream_{table_info.schema}_{table_info.table}",
+                    "database.streamid": stream_id,
                     "transforms": "unwrap",
                     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
                 }
