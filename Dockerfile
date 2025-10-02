@@ -75,12 +75,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --- Application code ---
 COPY src/ ./src/
 COPY config/ ./config/
-COPY scripts/ ./scripts/
-
-# --- Permissions / scripts ---
-RUN chmod +x scripts/*.sh \
- && mkdir -p /app/logs \
- && chown -R cdc_user:cdc_user /app
 
 # --- Healthcheck ---
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
