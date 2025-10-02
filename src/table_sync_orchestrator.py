@@ -592,7 +592,7 @@ class TableSyncOrchestrator:
 
 def main():
     """Main entry point."""
-    config_path = os.getenv('CONFIG_PATH', '/app/config/production.yaml')
+    config_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
     
     orchestrator = TableSyncOrchestrator(config_path)
     orchestrator.run()
