@@ -11,6 +11,7 @@ yugabytedb:
   port: ${YUGABYTEDB_PORT:-5433}
   user: ${YUGABYTEDB_USER:-yugabyte}
   password: ${YUGABYTEDB_PASSWORD:-yugabyte}
+  database: ${YUGABYTEDB_DATABASE:-kafka}
   
 # BigQuery Configuration  
 bigquery:

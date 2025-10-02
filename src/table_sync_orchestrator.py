@@ -167,7 +167,13 @@ class TableSyncOrchestrator:
             if parsed.password:
                 config['yugabytedb']['password'] = parsed.password
             
+            # Store the database name from URL
+            if parsed.path and parsed.path != '/':
+                config['yugabytedb']['database'] = parsed.path.lstrip('/')
+            
+            database_name = parsed.path.lstrip('/') if parsed.path and parsed.path != '/' else 'default'
             print(f"✅ Parsed DATABASE_URL: {parsed.username}@{parsed.hostname}:{parsed.port}")
+            print(f"   Target Database: {database_name}")
             
         except Exception as e:
             print(f"Warning: Failed to parse DATABASE_URL: {e}")
@@ -279,7 +285,14 @@ class TableSyncOrchestrator:
             try:
                 conn_config = self.config['yugabytedb'].copy()
                 conn_config['database'] = database
+                
+                # Log connection details (without password) for debugging
+                safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
+                safe_config['password'] = '****' if 'password' in conn_config else 'None'
+                self.logger.debug("Attempting database connection", database=database, config=safe_config)
+                
                 self.db_connections[conn_key] = psycopg2.connect(**conn_config)
+                self.logger.info("Database connection established", database=database, user=conn_config.get('user'))
             except Exception as e:
                 self.logger.error("Failed to connect to database", database=database, error=str(e))
                 raise
@@ -293,20 +306,13 @@ class TableSyncOrchestrator:
     
     def _discover_databases(self) -> List[str]:
         """Discover all databases in the YugabyteDB cluster."""
-        try:
-            with self._get_db_connection('postgres') as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("""
-                        SELECT datname FROM pg_database 
-                        WHERE datistemplate = false 
-                        AND datname NOT IN ('postgres', 'template0', 'template1', 'yugabyte')
-                    """)
-                    databases = [row['datname'] for row in cur.fetchall()]
-                    self.logger.info("Discovered databases", databases=databases)
-                    return databases
-        except Exception as e:
-            self.logger.error("Failed to discover databases", error=str(e))
-            return []
+        # Get the target database from config
+        target_database = self.config.get('yugabytedb', {}).get('database', 'kafka')
+        
+        # For now, we'll work with the single configured database
+        # In the future, this could be expanded to discover multiple databases
+        self.logger.info("Using configured target database", database=target_database)
+        return [target_database]
     
     def _discover_tables(self, database: str) -> List[TableInfo]:
         """Discover all tables in a database with their annotations."""
