@@ -540,7 +540,7 @@ class TableSyncOrchestrator:
             connector_config = {
                 "name": connector_name,
                 "config": {
-                    "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBConnector",
+                    "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
                     "database.hostname": yb_cfg.get('host'),
                     "database.port": str(yb_cfg.get('port', 5433)),
                     "database.user": yb_cfg.get('user'),
