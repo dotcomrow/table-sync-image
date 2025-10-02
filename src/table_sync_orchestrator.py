@@ -302,29 +302,35 @@ class TableSyncOrchestrator:
 
     def _get_db_connection(self, database: str):
         """Get database connection with connection pooling."""
-        conn_key = database
-        if conn_key not in self.db_connections:
-            try:
-                conn_config = self.config['yugabytedb'].copy()
-                conn_config['database'] = database
-                
-                # Log connection details (without password) for debugging
-                safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
-                safe_config['password'] = '****' if 'password' in conn_config else 'None'
-                self.logger.debug("Attempting database connection", database=database, config=safe_config)
-                
-                self.db_connections[conn_key] = psycopg2.connect(**conn_config)
-                self.logger.info("Database connection established", database=database, user=conn_config.get('user'))
-            except Exception as e:
-                self.logger.error("Failed to connect to database", database=database, error=str(e))
-                raise
+        from contextlib import contextmanager
         
-        conn = self.db_connections[conn_key]
-        try:
-            yield conn
-        finally:
-            # Connection stays open for reuse
-            pass
+        @contextmanager
+        def get_connection():
+            conn_key = database
+            if conn_key not in self.db_connections:
+                try:
+                    conn_config = self.config['yugabytedb'].copy()
+                    conn_config['database'] = database
+                    
+                    # Log connection details (without password) for debugging
+                    safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
+                    safe_config['password'] = '****' if 'password' in conn_config else 'None'
+                    self.logger.debug("Attempting database connection", database=database, config=safe_config)
+                    
+                    self.db_connections[conn_key] = psycopg2.connect(**conn_config)
+                    self.logger.info("Database connection established", database=database, user=conn_config.get('user'))
+                except Exception as e:
+                    self.logger.error("Failed to connect to database", database=database, error=str(e))
+                    raise
+            
+            conn = self.db_connections[conn_key]
+            try:
+                yield conn
+            finally:
+                # Connection stays open for reuse
+                pass
+        
+        return get_connection()
     
     def _discover_databases(self) -> List[str]:
         """Discover all databases in the YugabyteDB cluster, creating target database if needed."""
@@ -361,7 +367,7 @@ class TableSyncOrchestrator:
                                            database=target_database, user=username)
                             
                             # Connect to the new database to set up comprehensive permissions
-                            conn.close()  # Close system db connection
+                            # Note: conn will be closed in the finally block
                             
                             # Connect to the new database to grant schema permissions
                             with self._get_db_connection(target_database) as new_db_conn:
