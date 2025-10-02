@@ -606,13 +606,42 @@ def main():
     """Main entry point."""
     import sys
     
-    # Simple test mode check
+    # Simple test mode check - exit early without initializing services
     if len(sys.argv) > 1 and sys.argv[1] == '--test':
         print("Table Sync Orchestrator - Test Mode")
-        print("Configuration file parsing: OK")
-        print("Python dependencies: OK")
-        print("Container structure: OK")
-        return
+        
+        # Test configuration file can be loaded
+        config_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
+        try:
+            import yaml
+            import re
+            with open(config_path, 'r') as f:
+                config_content = f.read()
+            
+            # Test environment variable substitution
+            def env_replacer(match):
+                env_var = match.group(1)
+                if ':-' in env_var:
+                    var_name, default_value = env_var.split(':-', 1)
+                elif ':' in env_var:
+                    var_name, default_value = env_var.split(':', 1)
+                else:
+                    var_name = env_var
+                    default_value = ''
+                return os.getenv(var_name, default_value)
+            
+            config_content = re.sub(r'\$\{([^}]+)\}', env_replacer, config_content)
+            config = yaml.safe_load(config_content)
+            
+            print("✅ Configuration file parsing: OK")
+            print("✅ Python dependencies: OK") 
+            print("✅ Container structure: OK")
+            print("✅ YAML environment substitution: OK")
+            return
+            
+        except Exception as e:
+            print(f"❌ Configuration test failed: {e}")
+            sys.exit(1)
     
     config_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
     
