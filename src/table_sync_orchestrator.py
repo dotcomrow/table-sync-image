@@ -133,11 +133,45 @@ class TableSyncOrchestrator:
                 return os.getenv(var_name, default_value)
             
             config_content = re.sub(r'\$\{([^}]+)\}', env_replacer, config_content)
-            return yaml.safe_load(config_content)
+            config = yaml.safe_load(config_content)
+            
+            # Parse DATABASE_URL if provided and override YAML config
+            self._parse_database_url(config)
+            
+            return config
             
         except Exception as e:
             print(f"Failed to load config from {config_path}: {e}")
             sys.exit(1)
+    
+    def _parse_database_url(self, config: Dict[str, Any]):
+        """Parse DATABASE_URL environment variable and override YugabyteDB config."""
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            return
+        
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(database_url)
+            
+            # Override yugabytedb config section with parsed values
+            if 'yugabytedb' not in config:
+                config['yugabytedb'] = {}
+            
+            if parsed.hostname:
+                config['yugabytedb']['host'] = parsed.hostname
+            if parsed.port:
+                config['yugabytedb']['port'] = parsed.port
+            if parsed.username:
+                config['yugabytedb']['user'] = parsed.username
+            if parsed.password:
+                config['yugabytedb']['password'] = parsed.password
+            
+            print(f"✅ Parsed DATABASE_URL: {parsed.username}@{parsed.hostname}:{parsed.port}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to parse DATABASE_URL: {e}")
+            print(f"DATABASE_URL format should be: postgresql://user:password@host:port/database")
     
     def _derive_project_id(self):
         """Auto-derive BigQuery project ID from service account credentials if not set."""

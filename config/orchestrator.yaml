@@ -4,6 +4,8 @@
 scan_interval_seconds: ${SCAN_INTERVAL_SECONDS:-30}
 
 # YugabyteDB Connection
+# Note: If DATABASE_URL environment variable is set, it will override these values
+# Format: postgresql://username:password@hostname:port/database
 yugabytedb:
   host: ${YUGABYTEDB_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}
   port: ${YUGABYTEDB_PORT:-5433}
