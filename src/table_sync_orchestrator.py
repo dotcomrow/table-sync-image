@@ -10,6 +10,7 @@ Key points:
 - Guards BigQuery ops when client is None
 - Creates/ensures Debezium YugabyteDB gRPC connectors (not PG connector)
 - CDC stream id is taken from annotation or config; auto-list/create via yb-admin when master addresses are available (unless explicitly disabled)
+- Validates connector config before create; adds required fields (topic.prefix, database.server.name)
 """
 
 import os
@@ -527,6 +528,43 @@ class TableSyncOrchestrator:
 
         return None
 
+    def _validate_connector_config(self, connector_class: str, config: Dict[str, str]) -> Tuple[bool, List[str]]:
+        """Call Kafka Connect /connector-plugins/{connectorType}/config/validate to validate the config."""
+        kc = (self.config.get('kafka_connect') or {}).get('url')
+        if not kc:
+            return False, ["Kafka Connect URL not configured"]
+        try:
+            url = f"{kc}/connector-plugins/{connector_class}/config/validate"
+            resp = requests.put(url, json={"connector.class": connector_class, **config}, timeout=10)
+            # Some Connect versions expect POST with {"config":{}} at /validate; try both if needed
+            if resp.status_code == 404:
+                resp = requests.post(url, json={"config": {"connector.class": connector_class, **config}}, timeout=10)
+            if resp.status_code >= 400:
+                return False, [f"Validation HTTP {resp.status_code}: {resp.text}"]
+
+            data = resp.json() if resp.text else {}
+            # Common response schema: {"name": "...", "error_count": N, "configs":[{"value":{"name":"...","errors":[...]}, ...}]}
+            errs: List[str] = []
+            error_count = data.get("error_count")
+            cfgs = data.get("configs") or []
+            for item in cfgs:
+                v = item.get("value") or {}
+                name = v.get("name")
+                es = v.get("errors") or []
+                for e in es:
+                    if name:
+                        errs.append(f"{name}: {e}")
+                    else:
+                        errs.append(str(e))
+            if error_count and int(error_count) > 0:
+                return False, errs or ["Unknown validation errors"]
+            # Some Connects don’t set error_count; treat presence of errors as failure
+            if any(errs):
+                return False, errs
+            return True, []
+        except Exception as e:
+            return False, [f"Validation call failed: {e}"]
+
     def _create_cdc_connector(self, table_info: TableInfo) -> bool:
         """
         Ensure a Debezium YugabyteDB gRPC connector exists for this table's database.
@@ -537,6 +575,8 @@ class TableSyncOrchestrator:
         if not kc:
             self.logger.error("Kafka Connect URL not configured")
             return False
+
+        connector_class = "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector"
 
         db = table_info.database
         sch = table_info.schema
@@ -560,8 +600,7 @@ class TableSyncOrchestrator:
 
         # 3) Build connector config for YugabyteDB gRPC connector
         yb = self.config.get('yugabytedb', {}) or {}
-        host = yb.get('host', '127.0.0.1')
-        port = str(yb.get('port', 5433))
+        host = yb.get('host', '127.0.0.1')  # used only for defaulting master port if needed
         master_addrs = (
             yb.get('database.master.addresses')
             or yb.get('master_addresses')
@@ -569,29 +608,60 @@ class TableSyncOrchestrator:
             or f"{host}:7100"
         )
 
-        cfg = {
+        topic_prefix = f"yb_{db}"
+        server_name = topic_prefix  # keep the same for compatibility
+
+        cfg: Dict[str, str] = {
             "name": name,
             "config": {
-                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-                "tasks.max": "1",
+                "connector.class": connector_class,
+                "tasks.max": str(yb.get("tasks_max", 1)),
 
                 # Yugabyte gRPC-specific settings
                 "database.master.addresses": master_addrs,
                 "database.streamid": stream_id,
 
-                # Optional/aux YSQL context
+                # Debezium required / commonly required
+                "topic.prefix": topic_prefix,
+                "database.server.name": server_name,
+
+                # Limit to one table (schema-qualified)
                 "database.dbname": db,
                 "table.include.list": f"{sch}.{tbl}",
 
                 # Snapshot/format defaults
-                "snapshot.mode": "initial",             # change to "never" if you only want streaming
-                "tombstones.on.delete": "false",
-                "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "key.converter.schemas.enable": "false",
-                "value.converter.schemas.enable": "false",
+                "snapshot.mode": str(yb.get("snapshot_mode", "initial")),  # "initial" or "never"
+                "tombstones.on.delete": str(yb.get("tombstones_on_delete", "false")).lower(),
+                "key.converter": str(yb.get("key_converter", "org.apache.kafka.connect.json.JsonConverter")),
+                "value.converter": str(yb.get("value_converter", "org.apache.kafka.connect.json.JsonConverter")),
+                "key.converter.schemas.enable": str(yb.get("key_converter_schemas_enable", "false")).lower(),
+                "value.converter.schemas.enable": str(yb.get("value_converter_schemas_enable", "false")).lower(),
             }
         }
+
+        # Optional TLS wiring if provided
+        tls = yb.get("tls") or {}
+        if isinstance(tls, dict):
+            if "enabled" in tls:
+                cfg["config"]["database.tls.enabled"] = str(bool(tls.get("enabled"))).lower()
+            if tls.get("ca_cert_path"):
+                cfg["config"]["database.tls.ca.cert.path"] = str(tls["ca_cert_path"])
+            if tls.get("cert_path"):
+                cfg["config"]["database.tls.cert.path"] = str(tls["cert_path"])
+            if tls.get("key_path"):
+                cfg["config"]["database.tls.key.path"] = str(tls["key_path"])
+            if tls.get("key_password"):
+                cfg["config"]["database.tls.key.password"] = str(tls["key_password"])
+
+        # 3.5) Preflight validation for better error messages
+        ok, errors = self._validate_connector_config(connector_class, cfg["config"])
+        if not ok:
+            self.logger.error(
+                "Connector config validation failed",
+                connector=name,
+                errors=errors[:20]  # limit noise
+            )
+            return False
 
         # 4) Create the connector
         try:
@@ -599,6 +669,11 @@ class TableSyncOrchestrator:
             if cr.status_code in (200, 201):
                 self.logger.info("CDC connector created", connector=name)
                 return True
+            # If Connect returns 409 (name exists) we still succeed
+            if cr.status_code == 409:
+                self.logger.info("CDC connector already existed (race)", connector=name)
+                return True
+
             self.logger.error("Failed to create CDC connector", status=cr.status_code, body=cr.text)
             return False
         except Exception as e:
