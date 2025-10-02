@@ -290,9 +290,9 @@ class TableSyncOrchestrator:
                 kwargs = self._pg_conn_kwargs(base_cfg, database=sys_db)
                 safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
                 self.logger.debug("Attempting system database connection", database=sys_db, config=safe_log)
-                with psycopg2.connect(**kwargs) as conn:
-                    self.logger.info("System database connection established", database=sys_db, user=kwargs.get('user'))
-                    return conn
+                conn = psycopg2.connect(**kwargs)
+                self.logger.info("System database connection established", database=sys_db, user=kwargs.get('user'))
+                return conn
             except Exception as e:
                 self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
         raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
@@ -436,6 +436,99 @@ class TableSyncOrchestrator:
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
+    
+    # ------------------------------ YugabyteDB CDC ------------------------------
+    
+    def _create_cdc_connector(self, table_info: TableInfo) -> bool:
+        """
+        Ensure a Debezium PG connector exists for this table.
+        Idempotent: if connector exists, returns True.
+        Uses Kafka Connect REST at config['kafka_connect']['url'].
+        """
+        kc = (self.config.get('kafka_connect') or {}).get('url')
+        if not kc:
+            self.logger.error("Kafka Connect URL not configured")
+            return False
+
+        db = table_info.database
+        sch = table_info.schema
+        tbl = table_info.table
+        name = f"debezium_{db}_{sch}_{tbl}".replace('.', '_').replace('-', '_')
+
+        try:
+            # 1) If already exists, treat as success
+            r = requests.get(f"{kc}/connectors/{name}")
+            if r.status_code == 200:
+                self.logger.info("CDC connector already exists", connector=name)
+                return True
+
+            # 2) Optional YB CDC stream (only if you truly need it)
+            # NOTE: This call name MUST match the defined helper.
+            stream_id = self._get_cdc_stream_id(db, sch, tbl)
+
+            # 3) Build connector config (Debezium PG; tune to your environment)
+            yb = self.config.get('yugabytedb', {}) or {}
+            host = yb.get('host')
+            port = yb.get('port', 5433)
+            user = yb.get('user')
+            password = yb.get('password')
+
+            if not all([host, port, user, password]):
+                self.logger.error("Missing Yugabyte connection fields for connector creation",
+                                host=bool(host), port=bool(port), user=bool(user), password=bool(password))
+                return False
+
+            # Include only the single table (schema-qualified)
+            table_include = f"{sch}.{tbl}"
+
+            cfg = {
+                "name": name,
+                "config": {
+                    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+                    "tasks.max": "1",
+                    "database.hostname": host,
+                    "database.port": str(port),
+                    "database.user": user,
+                    "database.password": password,
+                    "database.dbname": db,
+                    "database.server.name": f"{db}",
+                    "table.include.list": table_include,
+
+                    # Debezium basics / reliability
+                    "plugin.name": "pgoutput",
+                    "slot.name": f"slot_{db}_{sch}_{tbl}",
+                    "publication.name": f"pub_{db}_{sch}_{tbl}",
+                    "snapshot.mode": "initial",
+                    "tombstones.on.delete": "false",
+
+                    # Converters / formats as you prefer
+                    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+                    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                    "key.converter.schemas.enable": "false",
+                    "value.converter.schemas.enable": "false",
+                }
+            }
+
+            # If you truly require YB CDC stream wiring, pass it as a custom extension
+            if stream_id:
+                cfg["config"]["yb.cdc.stream.id"] = stream_id
+
+            # 4) Create the connector
+            cr = requests.post(f"{kc}/connectors", json=cfg, timeout=10)
+            if cr.status_code in (200, 201):
+                self.logger.info("CDC connector created", connector=name)
+                return True
+
+            self.logger.error("Failed to create CDC connector", status=cr.status_code, body=cr.text)
+            return False
+
+        except AttributeError as e:
+            # This catches the exact bug you’re seeing if helper name ever mismatches
+            self.logger.error("Failed to create CDC connector", error=str(e))
+            return False
+        except Exception as e:
+            self.logger.error("Failed to create CDC connector", error=str(e))
+            return False
 
     # ----------------------------- BigQuery -----------------------------
 
@@ -611,7 +704,12 @@ class TableSyncOrchestrator:
                 current = self.status_table.get(table_key)
 
                 bq_exists = self._check_bigquery_exists(ti.bq_dataset, ti.bq_table)
-                needs_sync = (current is None) or (not current.annotation_enabled) or (not bq_exists)
+                needs_sync = (
+                    current is None
+                    or (not current.annotation_enabled)
+                    or (not bq_exists)
+                    or (current is not None and not current.connector_exists)
+                )
 
                 if needs_sync:
                     self.logger.info("Starting sync for table", table=ti.full_name)
