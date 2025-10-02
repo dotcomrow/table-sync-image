@@ -345,6 +345,11 @@ class TableSyncOrchestrator:
                     cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
                     result = cur.fetchone()
                     
+                    # Also check what databases are visible to this user
+                    cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+                    all_dbs = [row[0] for row in cur.fetchall()]
+                    self.logger.info("All visible databases", databases=all_dbs)
+                    
                     if result:
                         self.logger.info("Target database found", database=target_database)
                         return [target_database]
@@ -353,10 +358,25 @@ class TableSyncOrchestrator:
                         
                         # Create the target database
                         # Note: CREATE DATABASE cannot be run inside a transaction
+                        username = self.config.get('yugabytedb', {}).get('user', 'vaultadmin')
+                        
+                        # Check current user's permissions before creating database
+                        cur.execute("SELECT current_user, session_user")
+                        user_info = cur.fetchone()
+                        self.logger.info("Current database user info", current_user=user_info[0], session_user=user_info[1])
+                        
+                        # Check if user has CREATEDB privilege
+                        cur.execute("SELECT rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
+                        createdb_result = cur.fetchone()
+                        if createdb_result:
+                            self.logger.info("User CREATEDB privilege", user=username, can_create_db=createdb_result[0])
+                        else:
+                            self.logger.warning("User not found in pg_roles", user=username)
+                            
                         conn.autocommit = True
                         try:
                             # Create the database with vaultadmin as owner
-                            username = self.config.get('yugabytedb', {}).get('user', 'vaultadmin')
+                            self.logger.info("Attempting to create database", database=target_database, owner=username)
                             cur.execute(f"CREATE DATABASE {target_database} OWNER {username}")
                             self.logger.info("Target database created successfully with owner", 
                                            database=target_database, owner=username)
@@ -365,6 +385,14 @@ class TableSyncOrchestrator:
                             cur.execute(f"GRANT ALL PRIVILEGES ON DATABASE {target_database} TO {username}")
                             self.logger.info("Granted all privileges on database", 
                                            database=target_database, user=username)
+                            
+                            # Verify the database was created and is visible
+                            cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
+                            verify_result = cur.fetchone()
+                            if verify_result:
+                                self.logger.info("Database creation verified", database=target_database)
+                            else:
+                                self.logger.error("Database creation failed - not visible after creation", database=target_database)
                             
                             # Connect to the new database to set up comprehensive permissions
                             # Note: conn will be closed in the finally block
