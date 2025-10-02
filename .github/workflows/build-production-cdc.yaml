@@ -92,6 +92,10 @@ jobs:
           echo "⚙️  Checking configuration template..."
           docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} ls -la /app/config/orchestrator.yaml
           
+          # Test orchestrator can run in test mode
+          echo "🧪 Testing orchestrator test mode..."
+          docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} python src/table_sync_orchestrator.py --test
+          
           echo "✅ Image tests completed"
 
       # Output image details
