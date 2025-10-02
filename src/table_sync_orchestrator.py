@@ -390,86 +390,90 @@ class TableSyncOrchestrator:
                             self.logger.info("User CREATEDB privilege", user=username, can_create_db=createdb_result[0])
                         else:
                             self.logger.warning("User not found in pg_roles", user=username)
+                
+                # Close cursor and set autocommit outside transaction
+                cur.close()
+                conn.autocommit = True
+                cur = conn.cursor()  # Get a new cursor for autocommit operations
+                
+                try:
+                    # Create the database with vaultadmin as owner
+                    self.logger.info("Attempting to create database", database=target_database, owner=username)
+                    cur.execute(f"CREATE DATABASE {target_database} OWNER {username}")
+                    self.logger.info("Target database created successfully with owner", 
+                                   database=target_database, owner=username)
+                    
+                    # Grant all privileges to vaultadmin on the new database
+                    cur.execute(f"GRANT ALL PRIVILEGES ON DATABASE {target_database} TO {username}")
+                    self.logger.info("Granted all privileges on database", 
+                                   database=target_database, user=username)
+                    
+                    # Verify the database was created and is visible
+                    cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
+                    verify_result = cur.fetchone()
+                    if verify_result:
+                        self.logger.info("Database creation verified", database=target_database)
+                    else:
+                        self.logger.error("Database creation failed - not visible after creation", database=target_database)
+                    
+                    # Connect to the new database to set up comprehensive permissions
+                    # Note: conn will be closed in the finally block
+                    
+                    # Connect to the new database to grant schema permissions
+                    with self._get_db_connection(target_database) as new_db_conn:
+                        new_db_conn.autocommit = True
+                        with new_db_conn.cursor() as new_cur:
+                            # Make vaultadmin owner of public schema
+                            new_cur.execute(f"ALTER SCHEMA public OWNER TO {username}")
                             
-                        conn.autocommit = True
-                        try:
-                            # Create the database with vaultadmin as owner
-                            self.logger.info("Attempting to create database", database=target_database, owner=username)
-                            cur.execute(f"CREATE DATABASE {target_database} OWNER {username}")
-                            self.logger.info("Target database created successfully with owner", 
-                                           database=target_database, owner=username)
+                            # Grant all privileges on public schema
+                            new_cur.execute(f"GRANT ALL ON SCHEMA public TO {username}")
+                            new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {username}")
+                            new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {username}")
+                            new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {username}")
+                            new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL PROCEDURES IN SCHEMA public TO {username}")
                             
-                            # Grant all privileges to vaultadmin on the new database
-                            cur.execute(f"GRANT ALL PRIVILEGES ON DATABASE {target_database} TO {username}")
-                            self.logger.info("Granted all privileges on database", 
+                            # Set default privileges for future objects created by any user
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO {username}")
+                            
+                            # Set default privileges for objects created by vaultadmin (grant to vaultadmin)
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TABLES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
+                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TYPES TO {username}")
+                            
+                            # Grant CREATE privilege on database for creating new schemas
+                            new_cur.execute(f"GRANT CREATE ON DATABASE {target_database} TO {username}")
+                            
+                            self.logger.info("Granted comprehensive privileges and ownership", 
                                            database=target_database, user=username)
-                            
-                            # Verify the database was created and is visible
-                            cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
-                            verify_result = cur.fetchone()
-                            if verify_result:
-                                self.logger.info("Database creation verified", database=target_database)
-                            else:
-                                self.logger.error("Database creation failed - not visible after creation", database=target_database)
-                            
-                            # Connect to the new database to set up comprehensive permissions
-                            # Note: conn will be closed in the finally block
-                            
-                            # Connect to the new database to grant schema permissions
-                            with self._get_db_connection(target_database) as new_db_conn:
-                                new_db_conn.autocommit = True
-                                with new_db_conn.cursor() as new_cur:
-                                    # Make vaultadmin owner of public schema
-                                    new_cur.execute(f"ALTER SCHEMA public OWNER TO {username}")
-                                    
-                                    # Grant all privileges on public schema
-                                    new_cur.execute(f"GRANT ALL ON SCHEMA public TO {username}")
-                                    new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {username}")
-                                    new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {username}")
-                                    new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {username}")
-                                    new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL PROCEDURES IN SCHEMA public TO {username}")
-                                    
-                                    # Set default privileges for future objects created by any user
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO {username}")
-                                    
-                                    # Set default privileges for objects created by vaultadmin (grant to vaultadmin)
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TABLES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
-                                    new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TYPES TO {username}")
-                                    
-                                    # Grant CREATE privilege on database for creating new schemas
-                                    new_cur.execute(f"GRANT CREATE ON DATABASE {target_database} TO {username}")
-                                    
-                                    self.logger.info("Granted comprehensive privileges and ownership", 
-                                                   database=target_database, user=username)
-                            
-                            return [target_database]
-                            
-                        except Exception as create_error:
-                            self.logger.error("Failed to create target database or set permissions", 
-                                            database=target_database, 
-                                            error=str(create_error))
-                            
-                            # List available databases for debugging
-                            try:
-                                cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
-                                available_dbs = [row[0] for row in cur.fetchall()]
-                                self.logger.info("Available databases", databases=available_dbs)
-                            except:
-                                pass
-                            
-                            # Return empty list if we can't create the database
-                            return []
-                        finally:
-                            conn.autocommit = False
+                    
+                    return [target_database]
+                    
+                except Exception as create_error:
+                    self.logger.error("Failed to create target database or set permissions", 
+                                    database=target_database, 
+                                    error=str(create_error))
+                    
+                    # List available databases for debugging
+                    try:
+                        cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+                        available_dbs = [row[0] for row in cur.fetchall()]
+                        self.logger.info("Available databases", databases=available_dbs)
+                    except:
+                        pass
+                    
+                    # Return empty list if we can't create the database
+                    return []
                 finally:
-                    cur.close()
+                    conn.autocommit = False
+                    if cur:
+                        cur.close()
             finally:
                 if conn and hasattr(conn, 'close'):
                     conn.close()
