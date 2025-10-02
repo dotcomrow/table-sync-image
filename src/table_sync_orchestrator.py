@@ -123,9 +123,13 @@ class TableSyncOrchestrator:
             import re
             def env_replacer(match):
                 env_var = match.group(1)
-                parts = env_var.split(':')
-                var_name = parts[0]
-                default_value = parts[1] if len(parts) > 1 else ''
+                if ':-' in env_var:
+                    var_name, default_value = env_var.split(':-', 1)
+                elif ':' in env_var:
+                    var_name, default_value = env_var.split(':', 1)
+                else:
+                    var_name = env_var
+                    default_value = ''
                 return os.getenv(var_name, default_value)
             
             config_content = re.sub(r'\$\{([^}]+)\}', env_replacer, config_content)
