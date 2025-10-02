@@ -458,20 +458,17 @@ class TableSyncOrchestrator:
                             new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {username}")
                             new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {username}")
                             new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {username}")
-                            new_cur.execute(f"GRANT ALL PRIVILEGES ON ALL PROCEDURES IN SCHEMA public TO {username}")
                             
                             # Set default privileges for future objects created by any user
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
-                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO {username}")
                             
                             # Set default privileges for objects created by vaultadmin (grant to vaultadmin)
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TABLES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON SEQUENCES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON FUNCTIONS TO {username}")
-                            new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON PROCEDURES TO {username}")
                             new_cur.execute(f"ALTER DEFAULT PRIVILEGES FOR USER {username} IN SCHEMA public GRANT ALL ON TYPES TO {username}")
                             
                             # Grant CREATE privilege on database for creating new schemas
