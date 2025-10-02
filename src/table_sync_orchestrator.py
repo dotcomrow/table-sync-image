@@ -278,34 +278,30 @@ class TableSyncOrchestrator:
         self.logger.info("Metrics server started", port=port)
     
     @contextmanager
-    def _get_db_connection(self, database: str = None):
-        """Get database connection with connection pooling."""
-        # If no database specified, use system database for admin operations
-        if database is None:
-            # Try common system databases in order of preference
-            system_databases = ['postgres', 'yugabyte', 'template1']
-            for sys_db in system_databases:
-                try:
-                    conn_config = self.config['yugabytedb'].copy()
-                    conn_config['database'] = sys_db
-                    
-                    safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
-                    safe_config['password'] = '****' if 'password' in conn_config else 'None'
-                    self.logger.debug("Attempting system database connection", database=sys_db, config=safe_config)
-                    
-                    conn = psycopg2.connect(**conn_config)
-                    self.logger.info("System database connection established", database=sys_db, user=conn_config.get('user'))
-                    yield conn
-                    conn.close()
-                    return
-                except Exception as e:
-                    self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
-                    continue
-            
-            # If we get here, all system database connections failed
-            raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
+    def _get_system_db_connection(self):
+        """Get a connection to a system database for admin operations."""
+        system_databases = ['postgres', 'yugabyte', 'template1']
+        for sys_db in system_databases:
+            try:
+                conn_config = self.config['yugabytedb'].copy()
+                conn_config['database'] = sys_db
+                
+                safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
+                safe_config['password'] = '****' if 'password' in conn_config else 'None'
+                self.logger.debug("Attempting system database connection", database=sys_db, config=safe_config)
+                
+                conn = psycopg2.connect(**conn_config)
+                self.logger.info("System database connection established", database=sys_db, user=conn_config.get('user'))
+                return conn
+            except Exception as e:
+                self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
+                continue
         
-        # Connect to specific database
+        # If we get here, all system database connections failed
+        raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
+
+    def _get_db_connection(self, database: str):
+        """Get database connection with connection pooling."""
         conn_key = database
         if conn_key not in self.db_connections:
             try:
@@ -337,7 +333,8 @@ class TableSyncOrchestrator:
         
         try:
             # Connect to system database to check if target database exists
-            with self._get_db_connection() as conn:
+            conn = self._get_system_db_connection()
+            try:
                 with conn.cursor() as cur:
                     cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
                     result = cur.fetchone()
@@ -419,6 +416,8 @@ class TableSyncOrchestrator:
                             return []
                         finally:
                             conn.autocommit = False
+            finally:
+                conn.close()
                         
         except Exception as e:
             self.logger.error("Failed to discover databases", error=str(e))
