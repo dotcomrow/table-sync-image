@@ -341,7 +341,8 @@ class TableSyncOrchestrator:
             # Connect to system database to check if target database exists
             conn = self._get_system_db_connection()
             try:
-                with conn.cursor() as cur:
+                cur = conn.cursor()
+                try:
                     # First, check if the vaultadmin user exists and has proper privileges
                     username = self.config.get('yugabytedb', {}).get('user', 'vaultadmin')
                     
@@ -468,6 +469,8 @@ class TableSyncOrchestrator:
                             return []
                         finally:
                             conn.autocommit = False
+                finally:
+                    cur.close()
             finally:
                 if conn and hasattr(conn, 'close'):
                     conn.close()
