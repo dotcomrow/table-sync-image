@@ -5,12 +5,13 @@
 Production Table Sync Orchestrator for YugabyteDB → BigQuery.
 
 Key points:
-- Filters out non-Postgres DSN keys (e.g., master_addresses) before psycopg2.connect()
+- Filters out non-Postgres DSN keys before psycopg2.connect()
 - Adds robust connection options (timeouts, keepalives, application_name)
 - Guards BigQuery ops when client is None
-- Creates/ensures Debezium YugabyteDB gRPC connectors (not PG connector)
-- CDC stream id is taken from annotation or config; auto-list/create via yb-admin when master addresses are available (unless explicitly disabled)
-- Validates connector config before create; adds required fields (topic.prefix, database.server.name)
+- Ensures Debezium YugabyteDB gRPC connector (single class: io.debezium.connector.yugabytedb.YugabyteDBConnector)
+- CDC stream id is taken from annotation or config; auto-list/create via yb-admin when master addresses are available
+- Validates connector config before create; includes required fields (topic.prefix) and sends 'name' in validation body
+- Logs failed HTTP requests to Kafka Connect with safely redacted payloads and truncated bodies
 """
 
 import os
@@ -206,6 +207,76 @@ class TableSyncOrchestrator:
             'last_scan_time': Gauge('sync_last_scan_timestamp', 'Timestamp of last scan'),
         }
 
+    # ----------------------------- HTTP logging helpers -----------------------------
+
+    def _log_http_bodies_on_failure(self) -> bool:
+        return bool((self.config.get("logging", {}) or {}).get("log_http_bodies_on_failure", True))
+
+    def _redact(self, data: Any, redact_keys: Optional[set] = None) -> Any:
+        DEFAULT = {
+            "password", "pass", "pwd", "secret", "token", "bearer", "authorization",
+            "api_key", "apikey", "sslkey", "sslpassword", "database.tls.key.password",
+            "sasl.jaas.config", "sasl.password", "sasl.mechanism",
+        }
+        keys = set(DEFAULT)
+        cfg = (self.config.get("logging", {}) or {}).get("redact_keys", [])
+        if isinstance(cfg, list):
+            keys |= {str(k).lower() for k in cfg}
+
+        def _sanitize(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    kl = str(k).lower()
+                    if kl in keys or any(kl.endswith("." + rk) for rk in keys):
+                        out[k] = "****"
+                    else:
+                        out[k] = _sanitize(v)
+                return out
+            elif isinstance(obj, list):
+                return [_sanitize(x) for x in obj]
+            else:
+                return obj
+
+        return _sanitize(data)
+
+    def _log_http_failure(
+        self,
+        *,
+        method: str,
+        url: str,
+        req_json: Optional[dict] = None,
+        resp: Optional[requests.Response] = None,
+        error: Optional[Exception] = None,
+        note: Optional[str] = None,
+    ):
+        fields = {"method": method, "url": url}
+        if resp is not None:
+            body = resp.text or ""
+            if len(body) > 8192:
+                body = body[:8192] + "...(truncated)"
+            fields.update({
+                "status": resp.status_code,
+                "response_text": body,
+                "response_headers": dict(resp.headers or {}),
+            })
+        if error is not None:
+            fields["error"] = str(error)
+        if note:
+            fields["note"] = note
+
+        if self._log_http_bodies_on_failure() and req_json is not None:
+            try:
+                redacted = self._redact(req_json)
+                pretty = json.dumps(redacted, ensure_ascii=False, indent=2)
+                if len(pretty) > 8192:
+                    pretty = pretty[:8192] + "...(truncated)"
+                fields["request_json"] = pretty
+            except Exception as e:
+                fields["request_json_error"] = f"failed to serialize: {e}"
+
+        self.logger.error("HTTP request failed", **fields)
+
     # ----------------------------- External Clients -----------------------------
 
     def _init_bigquery_client(self):
@@ -259,7 +330,6 @@ class TableSyncOrchestrator:
     # ----------------------------- Postgres helpers -----------------------------
 
     _PG_ALLOWED_KEYS = {
-        # common DSN keys
         'host', 'hostaddr', 'port', 'dbname', 'database', 'user', 'password',
         'connect_timeout', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl',
         'options', 'application_name', 'keepalives', 'keepalives_idle',
@@ -267,17 +337,13 @@ class TableSyncOrchestrator:
     }
 
     def _pg_conn_kwargs(self, base: Dict[str, Any], database: Optional[str] = None) -> Dict[str, Any]:
-        """Return a psycopg2-safe kwargs dict. Drops unknown keys like master_addresses."""
         yb = dict(base or {})
         if database:
             yb['database'] = database
-
-        # Map dbname/database preference for psycopg2
         if 'database' in yb:
             yb['dbname'] = yb['database']
             del yb['database']
 
-        # Defaults & tuning
         yb.setdefault('connect_timeout', 5)
         yb.setdefault('application_name', 'table-sync-orchestrator')
         yb.setdefault('keepalives', 1)
@@ -285,13 +351,10 @@ class TableSyncOrchestrator:
         yb.setdefault('keepalives_interval', 10)
         yb.setdefault('keepalives_count', 5)
 
-        # Filter to allowed keys only
         filtered = {k: v for k, v in yb.items() if k in self._PG_ALLOWED_KEYS}
-
         return filtered
 
     def _get_system_db_connection(self):
-        """Try postgres, yugabyte, template1 with filtered DSN. Return a live connection."""
         system_dbs = ['postgres', 'yugabyte', 'template1']
         base_cfg = self.config.get('yugabytedb', {}) or {}
         for sys_db in system_dbs:
@@ -307,7 +370,6 @@ class TableSyncOrchestrator:
         raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
 
     def _get_db_connection_ctx(self, database: str):
-        """Context manager for DB connection with filtered DSN."""
         @contextmanager
         def get_connection():
             base_cfg = self.config.get('yugabytedb', {}) or {}
@@ -348,7 +410,6 @@ class TableSyncOrchestrator:
             conn = self._get_system_db_connection()
             try:
                 with conn.cursor() as cur:
-                    # user info
                     username = (self.config.get('yugabytedb', {}) or {}).get('user', 'vaultadmin')
                     cur.execute("SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
                     row = cur.fetchone()
@@ -376,7 +437,6 @@ class TableSyncOrchestrator:
                 except Exception:
                     pass
 
-            # Create target if missing
             return self._create_database_if_needed(target, username)
         except Exception as e:
             self.logger.error("Failed to discover databases", error=str(e))
@@ -395,7 +455,6 @@ class TableSyncOrchestrator:
                 except Exception as e:
                     self.logger.error("Failed to create target database", database=target_database, error=str(e))
 
-            # post-create grants
             with self._get_db_connection_ctx(target_database) as new_conn:
                 new_conn.autocommit = True
                 with new_conn.cursor() as ncur:
@@ -411,7 +470,6 @@ class TableSyncOrchestrator:
                     ncur.execute(f'GRANT CREATE ON DATABASE "{target_database}" TO "{username}"')
                     self.logger.info("Granted privileges/ownership on new database", database=target_database, user=username)
 
-            # decide scan scope
             if self.config.get('comprehensive_database_scan', True):
                 with self._get_system_db_connection() as conn2, conn2.cursor() as cur2:
                     cur2.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
@@ -453,24 +511,13 @@ class TableSyncOrchestrator:
     # ------------------------------ YugabyteDB CDC ------------------------------
 
     def _get_cdc_stream_id(self, table_info: TableInfo) -> Optional[str]:
-        """
-        Return a Yugabyte CDC stream id for the table's database.
-        Priority:
-          1) annotation.bootstrap.cdc_stream_id
-          2) config.yugabytedb.cdc_stream_id
-          3) yb-admin list/create if master addresses available
-             (auto-enabled unless user explicitly sets allow_yb_admin: false)
-        """
-        # 1) per-table annotation
         if table_info.annotation and table_info.annotation.cdc_stream_id:
             return table_info.annotation.cdc_stream_id
 
-        # 2) config-level override
         yb_cfg = self.config.get("yugabytedb", {}) or {}
         if yb_cfg.get("cdc_stream_id"):
             return str(yb_cfg["cdc_stream_id"])
 
-        # master addresses from config or env
         master_addrs = (
             yb_cfg.get("master_addresses")
             or yb_cfg.get("masters")
@@ -478,9 +525,6 @@ class TableSyncOrchestrator:
             or os.getenv("YB_MASTER_ADDRESSES")
         )
 
-        # Decide whether yb-admin is allowed:
-        # - If user explicitly sets allow_yb_admin, honor it.
-        # - Otherwise, auto-enable if master addresses are provided.
         if "allow_yb_admin" in yb_cfg:
             allow_admin = bool(yb_cfg.get("allow_yb_admin"))
         else:
@@ -497,7 +541,6 @@ class TableSyncOrchestrator:
         yb_admin_bin = yb_cfg.get("yb_admin_path", "yb-admin")
         namespace = f"ysql.{table_info.database}"
 
-        # list_change_data_streams
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
@@ -511,7 +554,6 @@ class TableSyncOrchestrator:
         except Exception as e:
             self.logger.debug("yb-admin list_change_data_streams failed", error=str(e))
 
-        # create_change_data_stream
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
@@ -528,55 +570,97 @@ class TableSyncOrchestrator:
 
         return None
 
-    def _validate_connector_config(self, connector_class: str, config: Dict[str, str]) -> Tuple[bool, List[str]]:
-        """Call Kafka Connect /connector-plugins/{connectorType}/config/validate to validate the config."""
+    # ----------- Kafka Connect helpers (plugin presence + validation) ------------
+
+    def _list_connector_plugins(self) -> List[str]:
+        kc = (self.config.get('kafka_connect') or {}).get('url')
+        if not kc:
+            return []
+        url = f"{kc}/connector-plugins"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                self._log_http_failure(method="GET", url=url, resp=r, note="List connector plugins failed")
+                return []
+            payload = r.json() if r.text else []
+            classes = []
+            for item in payload or []:
+                # Connect returns objects with fields like: {"class":"io.debezium.connector.postgresql.PostgresConnector", ...}
+                c = item.get("class")
+                if c:
+                    classes.append(str(c))
+            return classes
+        except Exception as e:
+            self._log_http_failure(method="GET", url=url, error=e, note="List connector plugins raised exception")
+            return []
+
+    def _connector_plugin_available(self, wanted_class: str) -> bool:
+        plugins = self._list_connector_plugins()
+        if not plugins:
+            self.logger.warning("Could not enumerate connector plugins; proceeding but validation may fail")
+            return True  # do not hard-fail if listing is blocked
+        if wanted_class in plugins:
+            return True
+        self.logger.error("Wanted connector plugin not installed", wanted_class=wanted_class, available_plugins=plugins)
+        return False
+
+    def _validate_connector_config(self, connector_class: str, name: str, config: Dict[str, str]) -> Tuple[bool, List[str]]:
         kc = (self.config.get('kafka_connect') or {}).get('url')
         if not kc:
             return False, ["Kafka Connect URL not configured"]
-        try:
-            url = f"{kc}/connector-plugins/{connector_class}/config/validate"
-            resp = requests.put(url, json={"connector.class": connector_class, **config}, timeout=10)
-            # Some Connect versions expect POST with {"config":{}} at /validate; try both if needed
-            if resp.status_code == 404:
-                resp = requests.post(url, json={"config": {"connector.class": connector_class, **config}}, timeout=10)
-            if resp.status_code >= 400:
-                return False, [f"Validation HTTP {resp.status_code}: {resp.text}"]
+        url = f"{kc}/connector-plugins/{connector_class}/config/validate"
+        body_variants = [
+            # Most common: provide flat config with connector.class + name
+            {"name": name, "connector.class": connector_class, **config},
+            # Some clusters expect nested {"config":{...}}
+            {"config": {"name": name, "connector.class": connector_class, **config}},
+        ]
+        last_errs: List[str] = []
+        for payload in body_variants:
+            try:
+                # choose method PUT, fallback to POST if 404
+                resp = requests.put(url, json=payload, timeout=15)
+                if resp.status_code == 404:
+                    resp = requests.post(url, json=payload, timeout=15)
+                if resp.status_code >= 400:
+                    self._log_http_failure(method="PUT/POST", url=url, req_json=payload, resp=resp, note="Validate failed HTTP")
+                    last_errs = [f"Validation HTTP {resp.status_code}: {resp.text}"]
+                    continue
 
-            data = resp.json() if resp.text else {}
-            # Common response schema: {"name": "...", "error_count": N, "configs":[{"value":{"name":"...","errors":[...]}, ...}]}
-            errs: List[str] = []
-            error_count = data.get("error_count")
-            cfgs = data.get("configs") or []
-            for item in cfgs:
-                v = item.get("value") or {}
-                name = v.get("name")
-                es = v.get("errors") or []
-                for e in es:
-                    if name:
-                        errs.append(f"{name}: {e}")
-                    else:
-                        errs.append(str(e))
-            if error_count and int(error_count) > 0:
-                return False, errs or ["Unknown validation errors"]
-            # Some Connects don’t set error_count; treat presence of errors as failure
-            if any(errs):
-                return False, errs
-            return True, []
-        except Exception as e:
-            return False, [f"Validation call failed: {e}"]
+                data = resp.json() if resp.text else {}
+                errs: List[str] = []
+                error_count = data.get("error_count")
+                cfgs = data.get("configs") or []
+                for item in cfgs:
+                    v = item.get("value") or {}
+                    name_ = v.get("name")
+                    es = v.get("errors") or []
+                    for e in es:
+                        errs.append(f"{name_}: {e}" if name_ else str(e))
+
+                if (error_count and int(error_count) > 0) or errs:
+                    return False, errs or ["Unknown validation errors"]
+                return True, []
+            except Exception as e:
+                self._log_http_failure(method="PUT/POST", url=url, req_json=payload, error=e, note="Validate raised exception")
+                last_errs = [f"Validation call failed: {e}"]
+                continue
+        return False, last_errs or ["Validation failed"]
+
+    # ---------------------- Create Debezium connector ----------------------
 
     def _create_cdc_connector(self, table_info: TableInfo) -> bool:
-        """
-        Ensure a Debezium YugabyteDB gRPC connector exists for this table's database.
-        Idempotent: if connector exists, returns True.
-        Uses Kafka Connect REST at config['kafka_connect']['url'].
-        """
         kc = (self.config.get('kafka_connect') or {}).get('url')
         if not kc:
             self.logger.error("Kafka Connect URL not configured")
             return False
 
-        connector_class = "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector"
+        # Correct class name for Yugabyte gRPC connector
+        connector_class = "io.debezium.connector.yugabytedb.YugabyteDBConnector"
+
+        # Verify the plugin exists in Connect
+        if not self._connector_plugin_available(connector_class):
+            return False
 
         db = table_info.database
         sch = table_info.schema
@@ -585,12 +669,15 @@ class TableSyncOrchestrator:
 
         # 1) If already exists, treat as success
         try:
-            r = requests.get(f"{kc}/connectors/{name}", timeout=5)
+            url = f"{kc}/connectors/{name}"
+            r = requests.get(url, timeout=5)
             if r.status_code == 200:
                 self.logger.info("CDC connector already exists", connector=name)
                 return True
+            if r.status_code not in (200, 404):
+                self._log_http_failure(method="GET", url=url, resp=r, note="Unexpected status checking connector existence")
         except Exception as e:
-            self.logger.debug("Connector existence check failed", connector=name, error=str(e))
+            self._log_http_failure(method="GET", url=f"{kc}/connectors/{name}", error=e, note="Existence check raised exception")
 
         # 2) Need a CDC stream id
         stream_id = self._get_cdc_stream_id(table_info)
@@ -598,9 +685,9 @@ class TableSyncOrchestrator:
             self.logger.error("No CDC stream id available; cannot create connector", table=table_info.full_name)
             return False
 
-        # 3) Build connector config for YugabyteDB gRPC connector
+        # 3) Build connector config
         yb = self.config.get('yugabytedb', {}) or {}
-        host = yb.get('host', '127.0.0.1')  # used only for defaulting master port if needed
+        host = yb.get('host', '127.0.0.1')  # only used to default master port if env not set
         master_addrs = (
             yb.get('database.master.addresses')
             or yb.get('master_addresses')
@@ -609,75 +696,68 @@ class TableSyncOrchestrator:
         )
 
         topic_prefix = f"yb_{db}"
-        server_name = topic_prefix  # keep the same for compatibility
 
-        cfg: Dict[str, str] = {
-            "name": name,
-            "config": {
-                "connector.class": connector_class,
-                "tasks.max": str(yb.get("tasks_max", 1)),
+        cfg_config: Dict[str, str] = {
+            "connector.class": connector_class,
+            "tasks.max": str(yb.get("tasks_max", 1)),
 
-                # Yugabyte gRPC-specific settings
-                "database.master.addresses": master_addrs,
-                "database.streamid": stream_id,
+            # Yugabyte gRPC-specific settings
+            "database.master.addresses": master_addrs,
+            "database.streamid": stream_id,
 
-                # Debezium required / commonly required
-                "topic.prefix": topic_prefix,
-                "database.server.name": server_name,
+            # Debezium topic prefix (DBZ 2.x)
+            "topic.prefix": topic_prefix,
 
-                # Limit to one table (schema-qualified)
-                "database.dbname": db,
-                "table.include.list": f"{sch}.{tbl}",
+            # Table scope
+            "database.dbname": db,
+            "table.include.list": f"{sch}.{tbl}",
 
-                # Snapshot/format defaults
-                "snapshot.mode": str(yb.get("snapshot_mode", "initial")),  # "initial" or "never"
-                "tombstones.on.delete": str(yb.get("tombstones_on_delete", "false")).lower(),
-                "key.converter": str(yb.get("key_converter", "org.apache.kafka.connect.json.JsonConverter")),
-                "value.converter": str(yb.get("value_converter", "org.apache.kafka.connect.json.JsonConverter")),
-                "key.converter.schemas.enable": str(yb.get("key_converter_schemas_enable", "false")).lower(),
-                "value.converter.schemas.enable": str(yb.get("value_converter_schemas_enable", "false")).lower(),
-            }
+            # Snapshot/format defaults
+            "snapshot.mode": str(yb.get("snapshot_mode", "initial")),  # "initial" or "never"
+            "tombstones.on.delete": str(yb.get("tombstones_on_delete", "false")).lower(),
+            "key.converter": str(yb.get("key_converter", "org.apache.kafka.connect.json.JsonConverter")),
+            "value.converter": str(yb.get("value_converter", "org.apache.kafka.connect.json.JsonConverter")),
+            "key.converter.schemas.enable": str(yb.get("key_converter_schemas_enable", "false")).lower(),
+            "value.converter.schemas.enable": str(yb.get("value_converter_schemas_enable", "false")).lower(),
         }
 
-        # Optional TLS wiring if provided
+        # Optional TLS
         tls = yb.get("tls") or {}
         if isinstance(tls, dict):
             if "enabled" in tls:
-                cfg["config"]["database.tls.enabled"] = str(bool(tls.get("enabled"))).lower()
+                cfg_config["database.tls.enabled"] = str(bool(tls.get("enabled"))).lower()
             if tls.get("ca_cert_path"):
-                cfg["config"]["database.tls.ca.cert.path"] = str(tls["ca_cert_path"])
+                cfg_config["database.tls.ca.cert.path"] = str(tls["ca_cert_path"])
             if tls.get("cert_path"):
-                cfg["config"]["database.tls.cert.path"] = str(tls["cert_path"])
+                cfg_config["database.tls.cert.path"] = str(tls["cert_path"])
             if tls.get("key_path"):
-                cfg["config"]["database.tls.key.path"] = str(tls["key_path"])
+                cfg_config["database.tls.key.path"] = str(tls["key_path"])
             if tls.get("key_password"):
-                cfg["config"]["database.tls.key.password"] = str(tls["key_password"])
+                cfg_config["database.tls.key.password"] = str(tls["key_password"])
 
-        # 3.5) Preflight validation for better error messages
-        ok, errors = self._validate_connector_config(connector_class, cfg["config"])
+        # 3.5) Preflight validation for better error messages (include 'name')
+        ok, errors = self._validate_connector_config(connector_class, name, cfg_config)
         if not ok:
-            self.logger.error(
-                "Connector config validation failed",
-                connector=name,
-                errors=errors[:20]  # limit noise
-            )
+            self.logger.error("Connector config validation failed", connector=name, errors=errors[:20])
             return False
 
         # 4) Create the connector
+        create_payload = {"name": name, "config": cfg_config}
         try:
-            cr = requests.post(f"{kc}/connectors", json=cfg, timeout=15)
+            url = f"{kc}/connectors"
+            cr = requests.post(url, json=create_payload, timeout=20)
             if cr.status_code in (200, 201):
                 self.logger.info("CDC connector created", connector=name)
                 return True
-            # If Connect returns 409 (name exists) we still succeed
             if cr.status_code == 409:
                 self.logger.info("CDC connector already existed (race)", connector=name)
                 return True
 
-            self.logger.error("Failed to create CDC connector", status=cr.status_code, body=cr.text)
+            # Log full request/response for troubleshooting
+            self._log_http_failure(method="POST", url=url, req_json=create_payload, resp=cr, note="Create connector failed")
             return False
         except Exception as e:
-            self.logger.error("Failed to create CDC connector", error=str(e))
+            self._log_http_failure(method="POST", url=f"{kc}/connectors", req_json=create_payload, error=e, note="Create connector raised exception")
             return False
 
     # ----------------------------- BigQuery -----------------------------
@@ -791,7 +871,6 @@ class TableSyncOrchestrator:
             databases = self._discover_databases()
             self.logger.info("Starting comprehensive database scan",
                              database_count=len(databases), databases=databases)
-            # Count databases processed as a coarse signal
             self.metrics['tables_scanned'].inc(len(databases))
 
             max_threads_cfg = int(self.config.get('max_scan_threads', 0) or 0)
@@ -821,10 +900,8 @@ class TableSyncOrchestrator:
                              annotated_tables_found=annotated_tables,
                              threads_used=max_threads)
 
-            # Sequential sync phase
             active_syncs = 0
             for ti in all_tables:
-                # skip if no/disabled annotation
                 if not ti.annotation or not ti.annotation.enabled:
                     continue
 
@@ -844,7 +921,6 @@ class TableSyncOrchestrator:
 
                     if not bq_exists:
                         if not self._create_bigquery_resources(ti):
-                            # cannot proceed without BQ table
                             self.status_table[table_key] = SyncStatus(
                                 table_info=ti, last_scan=datetime.utcnow(),
                                 annotation_enabled=True, bigquery_exists=False,
@@ -874,17 +950,15 @@ class TableSyncOrchestrator:
                     active_syncs += 1
                     self.logger.info("Table sync completed", table=ti.full_name)
 
-                # upsert status
                 self.status_table[table_key] = SyncStatus(
                     table_info=ti,
                     last_scan=datetime.utcnow(),
                     annotation_enabled=True,
-                    bigquery_exists=bq_exists or needs_sync,  # if we created it, it's true now
-                    connector_exists=True,  # assume true after creation
+                    bigquery_exists=bq_exists or needs_sync,
+                    connector_exists=True,
                     sync_active=True,
                 )
 
-            # metrics
             self.metrics['scan_duration'].observe(time.time() - t0)
             self.metrics['last_scan_time'].set(time.time())
             self.metrics['active_syncs'].set(active_syncs)
@@ -941,7 +1015,6 @@ class TableSyncOrchestrator:
 # ----------------------------- Entrypoint -----------------------------
 
 def main():
-    # Lightweight --test mode to validate config/env substitution
     if len(sys.argv) > 1 and sys.argv[1] == '--test':
         print("Table Sync Orchestrator - Test Mode")
         cfg_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
