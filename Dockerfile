@@ -1,34 +1,34 @@
 # Production-ready YugabyteDB to BigQuery CDC Processor
 FROM python:3.11-slim
 
-# --- Build args / metadata ---
+# --- Build metadata ---
 ARG BUILD_TIMESTAMP
 ARG GIT_COMMIT
 ARG GIT_TAG
 
-# Yugabyte inputs (choose one of these strategies at build time)
-# 1) Provide a direct tarball URL:
-#      --build-arg YB_TARBALL_URL=https://downloads.yugabyte.com/releases/2.20.1.0/yugabyte-2.20.1.0-b123-linux-x86_64.tar.gz
-# 2) Provide version + build (downloads.yugabyte.com):
-#      --build-arg YB_VERSION=2.20.1.0 --build-arg YB_BUILD=123
-# 3) Provide only version (auto-discover from GitHub releases):
-#      --build-arg YB_VERSION=2.20.1.0
-ARG YB_TARBALL_URL=""
-ARG YB_VERSION="2.20.0.0"
-ARG YB_BUILD=""
+# Yugabyte inputs:
+# 1) Provide a direct tarball URL (best):
+#    --build-arg YB_TARBALL_URL=https://downloads.yugabyte.com/releases/2.20.0.0/yugabyte-2.20.0.0-b42-linux-x86_64.tar.gz
+# 2) Or provide version + build:
+#    --build-arg YB_VERSION=2.20.0.0 --build-arg YB_BUILD=42
+# 3) Or just version (auto-discover build by scraping the release index page):
+#    --build-arg YB_VERSION=2.20.0.0
+ARG YB_TARBALL_URL="https://software.yugabyte.com/releases/2025.1.0.1/yugabyte-2025.1.0.1-b3-linux-x86_64.tar.gz"
+ARG YB_VERSION="2025.1.0.1"
+ARG YB_BUILD="3"
 
-# --- Environment ---
+# --- Env ---
 ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
     GIT_COMMIT=${GIT_COMMIT} \
     GIT_TAG=${GIT_TAG} \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    # Make yb-admin discoverable by the app
+    # Tell the app where to find yb-admin
     YB_ADMIN_PATH=/usr/local/bin/yb-admin
 
-# System deps: curl/tar/ca-certs for downloads, jq for GitHub JSON parsing, netcat for healthcheck scripts
+# System deps: curl/tar/grep for discovery, netcat for health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tar jq netcat-traditional \
+      ca-certificates curl tar grep netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Install yb-admin (supports amd64 and arm64) ---
@@ -39,19 +39,22 @@ RUN set -eux; \
       arm64) yb_arch="linux-aarch64" ;; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
-    # Decide tarball URL
     url=""; \
     if [ -n "${YB_TARBALL_URL}" ]; then \
       url="${YB_TARBALL_URL}"; \
     elif [ -n "${YB_BUILD}" ]; then \
-      url="https://downloads.yugabyte.com/yugabyte-${YB_VERSION}-b${YB_BUILD}-${yb_arch}.tar.gz"; \
+      url="https://downloads.yugabyte.com/releases/${YB_VERSION}/yugabyte-${YB_VERSION}-b${YB_BUILD}-${yb_arch}.tar.gz"; \
     else \
-      api="https://api.github.com/repos/yugabyte/yugabyte-db/releases/tags/v${YB_VERSION}"; \
-      echo "Discovering Yugabyte tarball via ${api} ..."; \
-      url="$(curl -fsSL "$api" | jq -r ".assets[]?.browser_download_url | select( test(\"${yb_arch}.*\\\\.tar\\\\.gz$\"))" | head -n1)"; \
+      index="https://downloads.yugabyte.com/releases/${YB_VERSION}/"; \
+      echo "Discovering Yugabyte tarball via ${index} ..."; \
+      # Look for yugabyte-<ver>-b<digits>-<arch>.tar.gz on the index page
+      fname="$(curl -fsSL "$index" | grep -Eo "yugabyte-${YB_VERSION}-b[0-9]+-${yb_arch}\.tar\.gz" | head -n1 || true)"; \
+      if [ -n "$fname" ]; then \
+        url="${index}${fname}"; \
+      fi; \
     fi; \
     if [ -z "$url" ]; then \
-      echo "ERROR: Could not determine Yugabyte tarball URL. Provide YB_TARBALL_URL or YB_BUILD (with YB_VERSION), or ensure GitHub API access." >&2; \
+      echo "ERROR: Could not determine Yugabyte tarball URL. Provide YB_TARBALL_URL or YB_BUILD with YB_VERSION, or ensure the index page is reachable." >&2; \
       exit 1; \
     fi; \
     echo "Downloading $url"; \
