@@ -161,15 +161,17 @@ class TableSyncOrchestrator:
     
     def _init_logger(self) -> structlog.BoundLogger:
         """Initialize structured logging."""
+        import logging
+        log_level = self.config.get('logging', {}).get('level', 'INFO')
+        numeric_level = getattr(logging, log_level.upper())
+        
         structlog.configure(
             processors=[
                 structlog.processors.TimeStamper(fmt="iso"),
                 structlog.processors.add_log_level,
                 structlog.processors.JSONRenderer()
             ],
-            wrapper_class=structlog.make_filtering_bound_logger(
-                getattr(structlog.stdlib, self.config.get('logging', {}).get('level', 'INFO'))
-            ),
+            wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
             logger_factory=structlog.PrintLoggerFactory(),
             cache_logger_on_first_use=True,
         )
