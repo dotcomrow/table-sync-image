@@ -277,7 +277,6 @@ class TableSyncOrchestrator:
         start_http_server(port)
         self.logger.info("Metrics server started", port=port)
     
-    @contextmanager
     def _get_system_db_connection(self):
         """Get a connection to a system database for admin operations."""
         system_databases = ['postgres', 'yugabyte', 'template1']
