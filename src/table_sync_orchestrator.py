@@ -137,7 +137,8 @@ class TableSyncOrchestrator:
     
     def _derive_project_id(self):
         """Auto-derive BigQuery project ID from service account credentials if not set."""
-        if not self.config['bigquery'].get('project_id'):
+        project_id = self.config['bigquery'].get('project_id')
+        if not project_id or project_id == 'auto':
             try:
                 import json
                 credentials_path = self.config['bigquery']['credentials_path']

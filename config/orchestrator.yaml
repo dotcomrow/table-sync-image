@@ -13,7 +13,7 @@ yugabytedb:
 # BigQuery Configuration  
 bigquery:
   # Project ID will be auto-derived from service account credentials
-  project_id: ${BIGQUERY_PROJECT_ID:-}
+  project_id: ${BIGQUERY_PROJECT_ID:-auto}
   credentials_path: ${GOOGLE_APPLICATION_CREDENTIALS:-/vault/secrets/gcp-key.json}
   location: ${BIGQUERY_LOCATION:-US}
 
