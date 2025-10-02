@@ -61,7 +61,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --- Application code ---
 COPY src/ ./src/
 COPY config/ ./config/
-COPY scripts/ ./scripts/
 
 # --- Permissions / scripts ---
 RUN chmod +x scripts/*.sh \
