@@ -1,75 +1,55 @@
+# Production-ready YugabyteDB to BigQuery CDC Processor
+# Uses only well-established, battle-tested components
 FROM python:3.11-slim
 
 # Build arguments for version information
 ARG BUILD_TIMESTAMP
 ARG GIT_COMMIT
 ARG GIT_TAG
-ARG DOCKER_IMAGE_TAG
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
+# Set environment variables for build info
+ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
     GIT_COMMIT=${GIT_COMMIT} \
     GIT_TAG=${GIT_TAG} \
-    DOCKER_IMAGE_TAG=${DOCKER_IMAGE_TAG} \
-    USE_SHARED_CDC_STREAMS=true \
-    CLEANUP_CDC_ON_STARTUP=false
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-WORKDIR /app
-
-# Install system dependencies and build tools
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
-    ca-certificates \
-    wget \
-    unzip \
-    libc6 \
-    libgcc-s1 \
-    libstdc++6 \
+    netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python-based yb-admin wrapper for CDC stream management
-# This will be copied after the application files are copied
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash cdc_user
+WORKDIR /app
+RUN chown cdc_user:cdc_user /app
 
-# Install Python dependencies first for better layer caching
-COPY src/requirements.txt .
+# Copy requirements first for better Docker layer caching
+COPY requirements.production.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source
-COPY src/ .
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+COPY scripts/ ./scripts/
 
-# Copy test components for E2E testing
-COPY test_components/ test_components/
+# Make scripts executable
+RUN chmod +x scripts/*.sh
 
-ENV PYTHONPATH=/app
+# Set up logging directory
+RUN mkdir -p /app/logs && chown cdc_user:cdc_user /app/logs
 
-# Install Python-based yb-admin wrapper
-RUN cp yb_admin_wrapper.py /usr/local/bin/yb-admin \
-    && chmod +x /usr/local/bin/yb-admin \
-    && echo "✅ YugabyteDB admin wrapper installed" \
-    && yb-admin --help
-
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash app && \
-    chown -R app:app /app
-
-# Validate imports from requirements.txt
-RUN python validate_imports.py
-
-# Test yb-admin functionality before switching to non-root user  
-RUN echo "🧪 Final yb-admin functionality test..." \
-    && ls -la /usr/local/bin/yb-admin \
-    && file /usr/local/bin/yb-admin \
-    && (/usr/local/bin/yb-admin --help > /tmp/yb-admin-test.log 2>&1 || echo "Direct execution failed") \
-    && (yb-admin --help > /tmp/yb-admin-test.log 2>&1 && echo "✅ yb-admin help command works" || echo "⚠️ yb-admin may need runtime dependencies") \
-    && echo "📄 yb-admin test output:" \
-    && head -10 /tmp/yb-admin-test.log || echo "No output to show"
-
-USER app
-
-# Health check to ensure the application can start
+# Health check using curl (built into image)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python health_check.py status || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
-# Default command runs the main sync application
-CMD ["python", "app.py"]
+# Switch to non-root user
+USER cdc_user
+
+# Expose health check port
+EXPOSE 8080
+
+# Use exec form to ensure proper signal handling
+# Run the table sync orchestrator with orchestrator config
+ENTRYPOINT ["python", "src/table_sync_orchestrator.py"]

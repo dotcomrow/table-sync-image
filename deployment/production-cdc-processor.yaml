@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-cdc-processor
+  namespace: table-sync
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"  # Deploy after table-sync controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: production-cdc-processor
+  template:
+    metadata:
+      labels:
+        app: production-cdc-processor
+      annotations:
+        vault.security.banzaicloud.io/vault-addr: "https://vault.internal.lan"
+        vault.security.banzaicloud.io/vault-role: "table-sync"
+        vault.security.banzaicloud.io/vault-path: "kubernetes"
+    spec:
+      serviceAccountName: table-sync
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: production-cdc-processor
+        image: ghcr.io/dotcomrow/table-sync-image:ts-latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: health
+        - containerPort: 8000
+          name: metrics
+        env:
+        - name: CONFIG_PATH
+          value: "/app/config/orchestrator.yaml"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: SCAN_INTERVAL_SECONDS
+          value: "30"
+        - name: METRICS_PORT
+          value: "8000"
+        - name: HEALTH_CHECK_PORT
+          value: "8080"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/vault/secrets/gcp-key.json"
+        - name: KAFKA_CONNECT_URL
+          value: "http://kafka-connect.kafka.svc.internal.lan:8083"
+        - name: YUGABYTEDB_HOST
+          value: "yb-tserver-service.yugabyte.svc.cluster.local"
+        - name: YUGABYTEDB_PORT
+          value: "5433"
+        - name: YUGABYTEDB_USER
+          value: "yugabyte"
+        - name: YUGABYTEDB_PASSWORD
+          value: "yugabyte"
+        volumeMounts:
+        - name: vault-secrets
+          mountPath: /vault/secrets
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: vault-secrets
+        csi:
+          driver: secrets-store.csi.x-k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: "vault-database"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: production-cdc-processor
+  namespace: table-sync
+  labels:
+    app: production-cdc-processor
+spec:
+  selector:
+    app: production-cdc-processor
+  ports:
+  - name: health
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: production-cdc-processor
+  namespace: table-sync
+  labels:
+    app: production-cdc-processor
+spec:
+  selector:
+    matchLabels:
+      app: production-cdc-processor
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics

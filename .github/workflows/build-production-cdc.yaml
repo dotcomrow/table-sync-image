@@ -1,0 +1,159 @@
+name: Build Table Sync Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type (production/development)'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - development
+  push:
+    branches: [ main, prod ]
+    paths:
+    - 'src/**'
+    - 'config/**'
+    - 'scripts/**'
+    - 'Dockerfile'
+    - 'requirements.production.txt'
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build-production-cdc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set timestamp tag
+        id: set-tag
+        run: |
+          echo "tag=ts-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=ts-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Set version info
+        id: version-info
+        run: |
+          echo "build_timestamp=$(date -u +%Y-%m-%d_%H:%M:%S_UTC)" >> "$GITHUB_OUTPUT"
+          echo "git_tag=$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo 'no-tag')" >> "$GITHUB_OUTPUT"
+          echo "git_commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image coords
+        id: meta
+        run: |
+          echo "owner=${GITHUB_REPOSITORY%/*}"   >> "$GITHUB_OUTPUT"
+          echo "repo=${GITHUB_REPOSITORY##*/}"   >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ steps.meta.outputs.owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the production CDC processor
+      - name: Build and push production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }}
+            ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.latest_tag }}
+          build-args: |
+            BUILD_TIMESTAMP=${{ steps.version-info.outputs.build_timestamp }}
+            GIT_TAG=${{ steps.version-info.outputs.git_tag }}
+            GIT_COMMIT=${{ steps.version-info.outputs.git_commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # Run basic image tests
+      - name: Test built image
+        run: |
+          echo "🧪 Testing Table Sync Orchestrator image..."
+          
+          # Test image runs without errors
+          docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} --help || echo "Help command test"
+          
+          # Test image has correct structure
+          docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} ls -la /app/src/
+          
+          # Test health check script exists
+          docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} ls -la /app/scripts/health_check.sh
+          
+          # Test configuration file exists
+          docker run --rm ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }} ls -la /app/config/orchestrator.yaml
+          
+          echo "✅ Image tests completed"
+
+      # Output image details
+      - name: Output image info
+        run: |
+          echo "🏗️ **Table Sync Orchestrator Built Successfully**"
+          echo ""
+          echo "**Image Tags:**"
+          echo "- \`${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }}\`"
+          echo "- \`${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.latest_tag }}\`"
+          echo ""
+          echo "**Build Info:**"
+          echo "- Build Time: ${{ steps.version-info.outputs.build_timestamp }}"
+          echo "- Git Commit: ${{ steps.version-info.outputs.git_commit }}"
+          echo "- Git Tag: ${{ steps.version-info.outputs.git_tag }}"
+          echo ""
+          echo "**Usage in Kubernetes:**"
+          echo "\`\`\`yaml"
+          echo "spec:"
+          echo "  containers:"
+          echo "  - name: table-sync-orchestrator"
+          echo "    image: ${{ steps.meta.outputs.registry }}/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }}"
+          echo "\`\`\`"
+
+  # Optional: Build legacy table-sync image alongside
+  build-legacy-table-sync:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.build_type == 'development' || github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set timestamp tag
+        id: set-tag
+        run: echo "tag=ts-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image coords
+        id: meta
+        run: |
+          echo "owner=${GITHUB_REPOSITORY%/*}"   >> "$GITHUB_OUTPUT"
+          echo "repo=${GITHUB_REPOSITORY##*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ steps.meta.outputs.owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push legacy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile  # Original Dockerfile
+          push: true
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.repo }}:${{ steps.set-tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

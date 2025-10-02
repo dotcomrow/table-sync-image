@@ -34,7 +34,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLEANUP_CDC_ON_STARTUP = os.getenv("CLEANUP_CDC_ON_STARTUP", "true").lower() == "true"
 CDC_TEST_MODE = os.getenv("CDC_TEST_MODE", "false").lower() == "true"
 E2E_TEST_MODE = os.getenv("E2E_TEST_MODE", "false").lower() == "true"
-USE_SHARED_CDC_STREAMS = os.getenv("USE_SHARED_CDC_STREAMS", "true").lower() == "true"
+USE_SHARED_CDC_STREAMS = os.getenv("USE_SHARED_CDC_STREAMS", "false").lower() == "true"
 
 @dataclass
 class TableBootstrapConfig:
@@ -1058,29 +1058,46 @@ class PipelineManager:
         
         # Import here to avoid circular imports
         from debezium_manager import DebeziumConnectorManager, YugabytePublicationManager
+        from bigquery_sink_manager import BigQuerySinkConnectorManager
         
         self.connector_manager = DebeziumConnectorManager(debezium_url)
         self.publication_manager = YugabytePublicationManager(db_pool)
+        self.bigquery_sink_manager = BigQuerySinkConnectorManager(debezium_url)
     
     async def setup_debezium_connector(self, database_name: str, schema_name: str, table_name: str, config: TableBootstrapConfig, cdc_stream_id: Optional[str] = None):
-        """Setup Debezium connector for a table"""
-        logger.info(f"Setting up Debezium connector for {database_name}.{schema_name}.{table_name}")
+        """Setup complete CDC pipeline: YugabyteDB → Kafka → BigQuery"""
+        logger.info(f"Setting up complete CDC pipeline for {database_name}.{schema_name}.{table_name}")
         
         try:
-            # YugabyteDB gRPC connector doesn't need publications - it uses native streaming
-            # Create Debezium connector directly with stream ID for reuse
+            # Step 1: Create CDC source connector (YugabyteDB → Kafka)
+            logger.info(f"📡 Step 1: Creating CDC source connector...")
             conn_success = await self.connector_manager.create_connector(
                 database_name, schema_name, table_name, config.bq_table, cdc_stream_id
             )
             if not conn_success:
-                logger.error(f"Failed to create Debezium connector for {database_name}.{schema_name}.{table_name}")
+                logger.error(f"❌ Failed to create CDC source connector for {database_name}.{schema_name}.{table_name}")
                 return False
             
-            logger.info(f"Successfully setup pipeline for {database_name}.{schema_name}.{table_name}")
+            logger.info(f"✅ CDC source connector created successfully")
+            
+            # Step 2: Create BigQuery sink connector (Kafka → BigQuery)
+            logger.info(f"🎯 Step 2: Creating BigQuery sink connector...")
+            sink_success = await self.bigquery_sink_manager.ensure_sink_connector_for_cdc_topic(
+                database_name, schema_name, table_name
+            )
+            if not sink_success:
+                logger.warning(f"⚠️ Failed to create BigQuery sink connector for {database_name}.{schema_name}.{table_name}")
+                logger.info(f"   CDC source connector is still active - manual BigQuery sync available")
+                # Don't fail the whole pipeline if sink connector fails - source connector is still working
+            else:
+                logger.info(f"✅ BigQuery sink connector created successfully")
+            
+            logger.info(f"🎉 Successfully setup complete CDC pipeline for {database_name}.{schema_name}.{table_name}")
+            logger.info(f"   Pipeline: YugabyteDB → CDC → Kafka → {'BigQuery (auto)' if sink_success else 'BigQuery (manual)'}")
             return True
             
         except Exception as e:
-            logger.error(f"Error setting up pipeline for {database_name}.{schema_name}.{table_name}: {e}")
+            logger.error(f"❌ Error setting up pipeline for {database_name}.{schema_name}.{table_name}: {e}")
             return False
     
     async def remove_debezium_connector(self, database_name: str, schema_name: str, table_name: str):
@@ -1100,6 +1117,319 @@ class PipelineManager:
                 
         except Exception as e:
             logger.error(f"Error removing pipeline for {database_name}.{schema_name}.{table_name}: {e}")
+            return False
+    
+    async def create_test_table_with_data(self, database_name: str, table_name: str, initial_data: List[Dict]) -> bool:
+        """Create a test table with initial data for pipeline testing"""
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Drop table if exists
+                await conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                
+                # Create table
+                create_sql = f"""
+                CREATE TABLE {table_name} (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100),
+                    message TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+                """
+                await conn.execute(create_sql)
+                logger.info(f"✅ Test table {table_name} created")
+                
+                # Insert initial data
+                if initial_data:
+                    for data in initial_data:
+                        await conn.execute(
+                            f"INSERT INTO {table_name} (name, message) VALUES ($1, $2)",
+                            data['name'], data['message']
+                        )
+                    logger.info(f"✅ Inserted {len(initial_data)} initial records")
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to create test table {table_name}: {e}")
+            return False
+    
+    async def add_test_data(self, table_name: str, test_data: List[Dict]) -> bool:
+        """Add test data to existing table for live CDC testing"""
+        try:
+            async with self.db_pool.acquire() as conn:
+                for data in test_data:
+                    await conn.execute(
+                        f"INSERT INTO {table_name} (name, message) VALUES ($1, $2)",
+                        data['name'], data['message']
+                    )
+                logger.info(f"✅ Added {len(test_data)} test records to {table_name}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to add test data to {table_name}: {e}")
+            return False
+    
+    async def get_table_record_count(self, table_name: str) -> int:
+        """Get the current record count for a table"""
+        try:
+            async with self.db_pool.acquire() as conn:
+                result = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
+                return result or 0
+        except Exception as e:
+            logger.error(f"❌ Failed to get record count for {table_name}: {e}")
+            return 0
+    
+    async def create_individual_cdc_connector(self, database_name: str, schema_name: str, table_name: str, 
+                                           bigquery_project: str, bigquery_dataset: str,
+                                           server_name_override: Optional[str] = None) -> bool:
+        """
+        Create CDC connector with individual stream per table for better scalability
+        
+        Args:
+            database_name: YugabyteDB database name
+            schema_name: Schema name (usually 'public')
+            table_name: Table name to monitor
+            bigquery_project: BigQuery project ID
+            bigquery_dataset: BigQuery dataset name
+            server_name_override: Optional custom server name for Kafka topic naming
+            
+        Returns:
+            bool: True if connector created successfully
+        """
+        logger.info(f"🔗 Creating individual CDC connector for {database_name}.{schema_name}.{table_name}")
+        
+        try:
+            # Force individual streams by temporarily overriding the shared stream setting
+            original_shared_setting = self.connector_manager.use_shared_cdc_streams
+            self.connector_manager.use_shared_cdc_streams = False
+            
+            # Create unique connector name
+            connector_name = f"individual_{database_name}_{schema_name}_{table_name}_cdc"
+            
+            # Check if connector already exists
+            if await self.connector_manager.connector_exists(connector_name):
+                logger.info(f"✅ Individual CDC connector {connector_name} already exists")
+                self.connector_manager.use_shared_cdc_streams = original_shared_setting
+                return True
+            
+            # Create connector configuration for individual stream
+            server_name = server_name_override or f"individual-{database_name}-{schema_name}"
+            topic_name = f"{server_name}.{schema_name}.{table_name}"
+            
+            config_dict = {
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "tasks.max": "1",
+                
+                # YugabyteDB connection
+                "database.hostname": self.connector_manager.db_hostname,
+                "database.port": self.connector_manager.db_port,
+                "database.user": self.connector_manager.db_user,
+                "database.password": self.connector_manager.db_password,
+                "database.dbname": database_name,
+                "database.master.addresses": self.connector_manager.db_master_addresses,
+                "database.server.name": server_name,
+                
+                # Table filtering - individual table only
+                "table.include.list": f"{schema_name}.{table_name}",
+                
+                # Individual stream settings for scalability
+                "snapshot.mode": "never",
+                "database.stream.prefix": f"individual_{database_name}_{schema_name}_{table_name}",
+                
+                # Converters
+                "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "key.converter.schemas.enable": "false",
+                "value.converter.schemas.enable": "false",
+                
+                # Timeouts
+                "cdcsdk.snapshot.txn.timeout": "900000",
+                "cdcsdk.connection.timeout": "10000",
+                
+                # Critical CDC settings from successful tests
+                "provide.transaction.metadata": "false",
+                "before.image.mode": "never",
+                "binary.handling.mode": "base64",
+                
+                # Error handling
+                "errors.tolerance": "all",
+                "errors.log.enable": "true",
+                "errors.log.include.messages": "true"
+            }
+            
+            # Create connector
+            success = await self.connector_manager._create_connector_with_config(connector_name, config_dict)
+            
+            # Restore original shared stream setting
+            self.connector_manager.use_shared_cdc_streams = original_shared_setting
+            
+            if success:
+                logger.info(f"✅ Individual CDC connector {connector_name} created successfully")
+                logger.info(f"   Topic: {topic_name}")
+                logger.info(f"   Stream: individual per table for scalability")
+                return True
+            else:
+                logger.error(f"❌ Failed to create individual CDC connector {connector_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error creating individual CDC connector: {e}")
+            # Restore original setting on error
+            self.connector_manager.use_shared_cdc_streams = original_shared_setting
+            return False
+    
+    async def create_bigquery_sink_for_topic(self, topic_name: str, bigquery_project: str, 
+                                           bigquery_dataset: str, connector_name: Optional[str] = None,
+                                           batch_size: int = 100) -> bool:
+        """
+        Create BigQuery sink connector for a specific topic with custom parameters
+        
+        Args:
+            topic_name: Kafka topic to consume from
+            bigquery_project: BigQuery project ID
+            bigquery_dataset: BigQuery dataset name
+            connector_name: Optional custom connector name
+            batch_size: Batch size for BigQuery writes
+            
+        Returns:
+            bool: True if sink connector created successfully
+        """
+        logger.info(f"🎯 Creating BigQuery sink for topic: {topic_name}")
+        
+        try:
+            if not connector_name:
+                # Generate connector name from topic
+                clean_topic = topic_name.replace(".", "_").replace("-", "_")
+                connector_name = f"{clean_topic}_bigquery_sink"
+            
+            # Delete existing connector first
+            await self.bigquery_sink_manager._delete_connector(connector_name)
+            await asyncio.sleep(2)
+            
+            # Create BigQuery sink configuration
+            config = {
+                "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                "topics": topic_name,
+                "project": bigquery_project,
+                "defaultDataset": bigquery_dataset,
+                "keyfile": "/vault/secrets/gcp-key.json",
+                "autoCreateTables": "true",
+                "autoUpdateSchemas": "true",
+                "sanitizeTopics": "true",
+                "allowNewBigQueryFields": "true",
+                "allowBigQueryRequiredFieldRelaxation": "true",
+                "transforms": "unwrap",
+                "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+                "transforms.unwrap.drop.tombstones": "false",
+                "batch.size": str(batch_size),
+                "flush.size": str(batch_size * 10),
+                "consumer.auto.offset.reset": "earliest",
+                "errors.tolerance": "all",
+                "errors.log.enable": "true",
+                "errors.log.include.messages": "true"
+            }
+            
+            success = await self.bigquery_sink_manager._create_connector_with_config(connector_name, config)
+            
+            if success:
+                logger.info(f"✅ BigQuery sink connector {connector_name} created successfully")
+                logger.info(f"   Target: {bigquery_project}.{bigquery_dataset}")
+                logger.info(f"   Batch size: {batch_size}")
+                return True
+            else:
+                logger.error(f"❌ Failed to create BigQuery sink connector {connector_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error creating BigQuery sink connector: {e}")
+            return False
+    
+    async def verify_connector_status(self, connector_name: str) -> Dict:
+        """
+        Verify connector status and return detailed information
+        
+        Returns:
+            Dict with connector status information
+        """
+        try:
+            status = await self.connector_manager.get_connector_status(connector_name)
+            if status:
+                connector_state = status.get("connector", {}).get("state", "UNKNOWN")
+                tasks = status.get("tasks", [])
+                
+                result = {
+                    "name": connector_name,
+                    "connector_state": connector_state,
+                    "tasks": [],
+                    "healthy": connector_state == "RUNNING"
+                }
+                
+                for i, task in enumerate(tasks):
+                    task_state = task.get("state", "UNKNOWN")
+                    result["tasks"].append({
+                        "id": i,
+                        "state": task_state,
+                        "healthy": task_state == "RUNNING"
+                    })
+                    if task_state != "RUNNING":
+                        result["healthy"] = False
+                
+                return result
+            else:
+                return {"name": connector_name, "connector_state": "NOT_FOUND", "healthy": False}
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking connector status: {e}")
+            return {"name": connector_name, "connector_state": "ERROR", "healthy": False, "error": str(e)}
+    
+    async def cleanup_test_resources(self, database_name: str, schema_name: str, table_name: str, 
+                                   cdc_connector_name: Optional[str] = None, 
+                                   bq_connector_name: Optional[str] = None) -> bool:
+        """
+        Clean up test resources including table and connectors
+        
+        Args:
+            database_name: Database name
+            schema_name: Schema name
+            table_name: Table name to drop
+            cdc_connector_name: Optional CDC connector name to delete
+            bq_connector_name: Optional BigQuery connector name to delete
+            
+        Returns:
+            bool: True if cleanup successful
+        """
+        logger.info(f"🧹 Cleaning up test resources for {database_name}.{schema_name}.{table_name}")
+        
+        success = True
+        
+        try:
+            # Delete CDC connector
+            if cdc_connector_name:
+                cdc_deleted = await self.connector_manager.delete_connector_by_name(cdc_connector_name)
+                if cdc_deleted:
+                    logger.info(f"✅ CDC connector {cdc_connector_name} deleted")
+                else:
+                    logger.warning(f"⚠️ Failed to delete CDC connector {cdc_connector_name}")
+                    success = False
+            
+            # Delete BigQuery sink connector
+            if bq_connector_name:
+                bq_deleted = await self.bigquery_sink_manager._delete_connector(bq_connector_name)
+                if bq_deleted:
+                    logger.info(f"✅ BigQuery sink connector {bq_connector_name} deleted")
+                else:
+                    logger.warning(f"⚠️ Failed to delete BigQuery sink connector {bq_connector_name}")
+                    success = False
+            
+            # Drop test table
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                logger.info(f"✅ Test table {table_name} dropped")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Error during cleanup: {e}")
             return False
 
 class TableSyncManager:

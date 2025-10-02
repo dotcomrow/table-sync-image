@@ -1,0 +1,32 @@
+# Production Table Sync Orchestrator Dependencies
+# All dependencies chosen for production stability and long-term support
+
+# Database connectivity - PostgreSQL/YugabyteDB
+psycopg2-binary==2.9.7       # Most stable PostgreSQL adapter
+
+# BigQuery Client - Google's Official SDK  
+google-cloud-bigquery==3.13.0    # Google's official, mature BigQuery client
+google-auth==2.23.4              # Google's auth library
+google-cloud-core==2.3.3         # Core Google Cloud utilities
+
+# HTTP/REST - Standard Libraries
+requests==2.31.0             # 12+ years, most popular HTTP library
+
+# Configuration & Logging - Python Standard Enhanced
+pyyaml==6.0.1                # YAML configuration parsing
+structlog==23.2.0            # Structured logging (used by major companies)
+
+# Monitoring & Health Checks - Proven Solutions
+prometheus-client==0.19.0    # Prometheus metrics (industry standard)
+flask==3.0.0                 # Lightweight web framework for health checks
+
+# JSON Processing - Built into Python
+# jsonschema==4.20.0         # JSON schema validation (optional)
+
+# Reliability & Resilience - Battle-tested
+tenacity==8.2.3              # Retry logic with exponential backoff
+
+# Development & Testing (optional for runtime)
+pytest==7.4.3               # Testing framework
+black==23.11.0               # Code formatting
+flake8==6.1.0                # Linting

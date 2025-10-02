@@ -96,6 +96,48 @@ class HealthChecker:
                 "timestamp": time.time()
             }
     
+    async def check_bigquery_sink_connectors(self) -> Dict[str, any]:
+        """Check BigQuery sink connector health"""
+        try:
+            # Import BigQuery sink manager
+            from bigquery_sink_manager import BigQuerySinkConnectorManager
+            sink_manager = BigQuerySinkConnectorManager(self.debezium_url)
+            
+            # Get sink connector health info
+            health_info = await sink_manager.get_sink_connector_health()
+            
+            total_connectors = health_info["total_connectors"]
+            running_connectors = health_info["running"]
+            
+            if total_connectors == 0:
+                return {
+                    "status": "warning",
+                    "message": "No BigQuery sink connectors found",
+                    "details": health_info,
+                    "timestamp": time.time()
+                }
+            elif running_connectors == total_connectors:
+                return {
+                    "status": "healthy",
+                    "message": f"All {total_connectors} BigQuery sink connectors are running",
+                    "details": health_info,
+                    "timestamp": time.time()
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "message": f"Only {running_connectors} of {total_connectors} BigQuery sink connectors are running",
+                    "details": health_info,
+                    "timestamp": time.time()
+                }
+                
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to check BigQuery sink connectors: {str(e)}",
+                "timestamp": time.time()
+            }
+    
     async def check_table_sync_state_table(self) -> Dict[str, any]:
         """Check if the table sync state table exists and is accessible"""
         try:
@@ -142,12 +184,13 @@ class HealthChecker:
             "yugabyte": await self.check_yugabyte_connection(),
             "bigquery": self.check_bigquery_connection(),
             "debezium": await self.check_debezium_connection(),
+            "bigquery_sink_connectors": await self.check_bigquery_sink_connectors(),
             "state_table": await self.check_table_sync_state_table()
         }
         
-        # Determine overall status
+        # Determine overall status - include warnings as acceptable
         all_healthy = all(
-            check["status"] in ["healthy", "not_configured"] 
+            check["status"] in ["healthy", "not_configured", "warning"] 
             for check in health_checks.values()
         )
         
@@ -156,7 +199,17 @@ class HealthChecker:
         return {
             "overall_status": overall_status,
             "timestamp": time.time(),
-            "components": health_checks
+            "components": health_checks,
+            "pipeline_status": {
+                "cdc_enabled": health_checks["debezium"]["status"] == "healthy",
+                "bigquery_sink_enabled": health_checks["bigquery_sink_connectors"]["status"] in ["healthy", "warning"],
+                "end_to_end_ready": (
+                    health_checks["yugabyte"]["status"] == "healthy" and
+                    health_checks["debezium"]["status"] == "healthy" and
+                    health_checks["bigquery"]["status"] in ["healthy", "not_configured"] and
+                    health_checks["bigquery_sink_connectors"]["status"] in ["healthy", "warning"]
+                )
+            }
         }
 
 class MetricsCollector:

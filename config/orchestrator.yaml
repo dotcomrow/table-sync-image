@@ -1,0 +1,41 @@
+# Production Table Sync Orchestrator Configuration
+
+# Scanning Configuration
+scan_interval_seconds: ${SCAN_INTERVAL_SECONDS:-30}
+
+# YugabyteDB Connection
+yugabytedb:
+  host: ${YUGABYTEDB_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}
+  port: ${YUGABYTEDB_PORT:-5433}
+  user: ${YUGABYTEDB_USER:-yugabyte}
+  password: ${YUGABYTEDB_PASSWORD:-yugabyte}
+  
+# BigQuery Configuration  
+bigquery:
+  # Project ID will be auto-derived from service account credentials
+  project_id: ${BIGQUERY_PROJECT_ID:-}
+  credentials_path: ${GOOGLE_APPLICATION_CREDENTIALS:-/vault/secrets/gcp-key.json}
+  location: ${BIGQUERY_LOCATION:-US}
+
+# Kafka Connect Configuration
+kafka_connect:
+  url: ${KAFKA_CONNECT_URL:-http://kafka-connect.kafka.svc.internal.lan:8083}
+
+# Logging Configuration
+logging:
+  level: ${LOG_LEVEL:-INFO}
+  format: json
+
+# Monitoring Configuration
+health_check:
+  port: ${HEALTH_CHECK_PORT:-8080}
+
+metrics:
+  port: ${METRICS_PORT:-8000}
+  enabled: true
+
+# Processing Configuration
+processing:
+  batch_size: ${BATCH_SIZE:-1000}
+  max_retries: ${MAX_RETRIES:-3}
+  retry_delay_seconds: ${RETRY_DELAY_SECONDS:-5}

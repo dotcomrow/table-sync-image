@@ -18,8 +18,8 @@ class DebeziumConnectorManager:
         self.connector_url = connector_url.rstrip('/')
         self.connectors_endpoint = f"{self.connector_url}/connectors"
         
-        # Check if we should use shared CDC streams (default: true for reliability)
-        self.use_shared_cdc_streams = os.getenv("USE_SHARED_CDC_STREAMS", "true").lower() == "true"
+        # Check if we should use shared CDC streams (default: false for scalability)
+        self.use_shared_cdc_streams = os.getenv("USE_SHARED_CDC_STREAMS", "false").lower() == "true"
         
         # Parse database configuration from DATABASE_URL environment variable
         database_url = os.getenv("DATABASE_URL", "postgresql://yugabyte@localhost:5433/yugabyte")
@@ -597,8 +597,17 @@ class DebeziumConnectorManager:
             
             # CRITICAL FIXES from E2E test to prevent NullPointerException
             "provide.transaction.metadata": "false",  # Critical: disable transaction metadata
+            "before.image.mode": "never",  # Critical: disable before images to prevent tombstone issues
             "binary.handling.mode": "base64",
-            "before.image.mode": "never",              # Critical: disable before images
+            
+            # Transform chain - exactly as validated in E2E test
+            "transforms": "unwrap,addTopicPrefix",
+            "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+            "transforms.unwrap.drop.tombstones": "false",  # Keep tombstones for proper CDC handling
+            "transforms.unwrap.delete.handling.mode": "rewrite",
+            "transforms.addTopicPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
+            f"transforms.addTopicPrefix.regex": f"yugabyte-{database_name}-{schema_name}\\.{schema_name}\\.{table_name}",
+            f"transforms.addTopicPrefix.replacement": f"bigquery-{bq_table}",
             
             # Error handling - same as E2E test
             "errors.tolerance": "all",
@@ -1359,4 +1368,54 @@ class YugabytePublicationManager:
                 
         except Exception as e:
             logger.error(f"Error dropping publication for {database_name}.{schema_name}.{table_name}: {e}")
+            return False
+    
+    async def delete_connector_by_name(self, connector_name: str) -> bool:
+        """Delete a connector by its exact name"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(f"{self.connectors_endpoint}/{connector_name}") as response:
+                    if response.status in [200, 204, 404]:  # 404 is OK if connector doesn't exist
+                        if response.status == 404:
+                            logger.info(f"Connector {connector_name} does not exist")
+                        else:
+                            logger.info(f"✅ Connector {connector_name} deleted successfully")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"❌ Failed to delete connector {connector_name}: {error_text}")
+                        return False
+        except Exception as e:
+            logger.error(f"❌ Error deleting connector {connector_name}: {e}")
+            return False
+    
+    async def _create_connector_with_config(self, connector_name: str, config: Dict) -> bool:
+        """Create a connector with custom configuration"""
+        try:
+            connector_config = {
+                "name": connector_name,
+                "config": config
+            }
+            
+            # Check if connector already exists
+            if await self.connector_exists(connector_name):
+                logger.info(f"Connector {connector_name} already exists")
+                return True
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.connectors_endpoint,
+                    json=connector_config,
+                    headers={"Content-Type": "application/json"}
+                ) as response:
+                    if response.status in [200, 201]:
+                        logger.info(f"✅ Connector {connector_name} created successfully")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"❌ Failed to create connector {connector_name}: {error_text}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Error creating connector {connector_name}: {e}")
             return False
