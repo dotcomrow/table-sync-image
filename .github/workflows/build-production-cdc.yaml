@@ -11,14 +11,6 @@ on:
         options:
         - production
         - development
-  push:
-    branches: [ main, prod ]
-    paths:
-    - 'src/**'
-    - 'config/**'
-    - 'scripts/**'
-    - 'Dockerfile'
-    - 'requirements.production.txt'
 
 permissions:
   contents: read
