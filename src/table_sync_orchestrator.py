@@ -278,8 +278,34 @@ class TableSyncOrchestrator:
         self.logger.info("Metrics server started", port=port)
     
     @contextmanager
-    def _get_db_connection(self, database: str):
+    def _get_db_connection(self, database: str = None):
         """Get database connection with connection pooling."""
+        # If no database specified, use system database for admin operations
+        if database is None:
+            # Try common system databases in order of preference
+            system_databases = ['postgres', 'yugabyte', 'template1']
+            for sys_db in system_databases:
+                try:
+                    conn_config = self.config['yugabytedb'].copy()
+                    conn_config['database'] = sys_db
+                    
+                    safe_config = {k: v for k, v in conn_config.items() if k != 'password'}
+                    safe_config['password'] = '****' if 'password' in conn_config else 'None'
+                    self.logger.debug("Attempting system database connection", database=sys_db, config=safe_config)
+                    
+                    conn = psycopg2.connect(**conn_config)
+                    self.logger.info("System database connection established", database=sys_db, user=conn_config.get('user'))
+                    yield conn
+                    conn.close()
+                    return
+                except Exception as e:
+                    self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
+                    continue
+            
+            # If we get here, all system database connections failed
+            raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
+        
+        # Connect to specific database
         conn_key = database
         if conn_key not in self.db_connections:
             try:
@@ -305,14 +331,50 @@ class TableSyncOrchestrator:
             pass
     
     def _discover_databases(self) -> List[str]:
-        """Discover all databases in the YugabyteDB cluster."""
+        """Discover all databases in the YugabyteDB cluster, creating target database if needed."""
         # Get the target database from config
         target_database = self.config.get('yugabytedb', {}).get('database', 'kafka')
         
-        # For now, we'll work with the single configured database
-        # In the future, this could be expanded to discover multiple databases
-        self.logger.info("Using configured target database", database=target_database)
-        return [target_database]
+        try:
+            # Connect to system database to check if target database exists
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
+                    result = cur.fetchone()
+                    
+                    if result:
+                        self.logger.info("Target database found", database=target_database)
+                        return [target_database]
+                    else:
+                        self.logger.warning("Target database does not exist, creating it", database=target_database)
+                        
+                        # Create the target database
+                        # Note: CREATE DATABASE cannot be run inside a transaction
+                        conn.autocommit = True
+                        try:
+                            cur.execute(f"CREATE DATABASE {target_database}")
+                            self.logger.info("Target database created successfully", database=target_database)
+                            return [target_database]
+                        except Exception as create_error:
+                            self.logger.error("Failed to create target database", 
+                                            database=target_database, 
+                                            error=str(create_error))
+                            
+                            # List available databases for debugging
+                            cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+                            available_dbs = [row[0] for row in cur.fetchall()]
+                            self.logger.info("Available databases", databases=available_dbs)
+                            
+                            # Return empty list if we can't create the database
+                            return []
+                        finally:
+                            conn.autocommit = False
+                        
+        except Exception as e:
+            self.logger.error("Failed to discover databases", error=str(e))
+            # Fallback to configured database
+            self.logger.info("Using configured target database (fallback)", database=target_database)
+            return [target_database]
     
     def _discover_tables(self, database: str) -> List[TableInfo]:
         """Discover all tables in a database with their annotations."""
