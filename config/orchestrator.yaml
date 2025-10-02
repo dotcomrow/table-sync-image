@@ -2,6 +2,12 @@
 
 # Scanning Configuration
 scan_interval_seconds: ${SCAN_INTERVAL_SECONDS:-30}
+# Enable comprehensive scanning of all databases (vs single target database)
+comprehensive_database_scan: ${COMPREHENSIVE_DATABASE_SCAN:-true}
+# Databases to exclude from scanning (comma-separated list)
+excluded_databases: ${EXCLUDED_DATABASES:-postgres,template0,template1}
+# Maximum number of concurrent database scanning threads (0 = number of databases)
+max_scan_threads: ${MAX_SCAN_THREADS:-0}
 
 # YugabyteDB Connection
 # Note: If DATABASE_URL environment variable is set, it will override these values
@@ -12,6 +18,10 @@ yugabytedb:
   user: ${YUGABYTEDB_USER:-yugabyte}
   password: ${YUGABYTEDB_PASSWORD:-yugabyte}
   database: ${YUGABYTEDB_DATABASE:-kafka}
+  # Master addresses for YugabyteDB CDC and Debezium connectors
+  master_addresses: ${YUGABYTE_MASTER_ADDRESSES:-yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100}
+  # Alternative master addresses specifically for Debezium (if different from yugabyte master addresses)
+  debezium_master_addresses: ${DEBEZIUM_MASTER_ADDRESSES:-${YUGABYTE_MASTER_ADDRESSES:-yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100}}
   
 # BigQuery Configuration  
 bigquery:

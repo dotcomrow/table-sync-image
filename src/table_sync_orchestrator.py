@@ -12,6 +12,7 @@ import threading
 import time
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any, Set, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
@@ -331,6 +332,24 @@ class TableSyncOrchestrator:
         
         return get_connection()
     
+    def _filter_excluded_databases(self, all_databases: List[str]) -> List[str]:
+        """Filter out excluded databases based on configuration."""
+        excluded_databases_config = self.config.get('excluded_databases', 'postgres,template0,template1')
+        if isinstance(excluded_databases_config, str):
+            excluded_databases = [db.strip() for db in excluded_databases_config.split(',') if db.strip()]
+        else:
+            excluded_databases = excluded_databases_config or []
+        
+        filtered_databases = [db for db in all_databases if db not in excluded_databases]
+        
+        self.logger.debug("Database filtering applied", 
+                         total_databases=len(all_databases),
+                         excluded_databases=excluded_databases,
+                         excluded_count=len(excluded_databases),
+                         remaining_databases=len(filtered_databases))
+        
+        return filtered_databases
+    
     def _discover_databases(self) -> List[str]:
         """Discover all databases in the YugabyteDB cluster, creating target database if needed."""
         # Get the target database from config
@@ -363,14 +382,32 @@ class TableSyncOrchestrator:
                     cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
                     result = cur.fetchone()
                     
-                    # Also check what databases are visible to this user
+                    # Query all databases and filter out excluded ones
                     cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
-                    all_dbs = [row[0] for row in cur.fetchall()]
-                    self.logger.info("All visible databases", databases=all_dbs)
+                    all_visible_dbs = [row[0] for row in cur.fetchall()]
+                    all_dbs = self._filter_excluded_databases(all_visible_dbs)
+                    
+                    self.logger.info("Database discovery completed", 
+                                   total_visible=len(all_visible_dbs),
+                                   scannable_databases=len(all_dbs),
+                                   databases=all_dbs)
                     
                     if result:
                         self.logger.info("Target database found", database=target_database)
-                        return [target_database]
+                        
+                        # Check if comprehensive scanning is enabled
+                        comprehensive_scan = self.config.get('comprehensive_database_scan', True)
+                        if comprehensive_scan:
+                            self.logger.info("Comprehensive scanning enabled - scanning all databases", 
+                                           database_count=len(all_dbs), databases=all_dbs)
+                            if len(all_dbs) > 5:
+                                self.logger.warning("Large number of databases detected - consider tuning scan_interval_seconds for performance", 
+                                                  database_count=len(all_dbs))
+                            return all_dbs
+                        else:
+                            self.logger.info("Single database scanning - only scanning target database", 
+                                           database=target_database)
+                            return [target_database]
                     else:
                         self.logger.warning("Target database does not exist, creating it", database=target_database)
                         
@@ -477,7 +514,24 @@ class TableSyncOrchestrator:
                             self.logger.info("Granted comprehensive privileges and ownership", 
                                            database=target_database, user=username)
                     
-                    return [target_database]
+                    # After creating the target database, determine scanning scope
+                    comprehensive_scan = self.config.get('comprehensive_database_scan', True)
+                    if comprehensive_scan:
+                        # Query all databases and filter out excluded ones
+                        cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+                        all_visible_dbs = [row[0] for row in cur.fetchall()]
+                        all_dbs = self._filter_excluded_databases(all_visible_dbs)
+                        
+                        self.logger.info("Database created successfully, comprehensive scanning enabled", 
+                                       created_database=target_database, 
+                                       total_visible=len(all_visible_dbs),
+                                       scannable_databases=len(all_dbs),
+                                       databases=all_dbs)
+                        return all_dbs
+                    else:
+                        self.logger.info("Database created successfully, single database scanning", 
+                                       created_database=target_database)
+                        return [target_database]
                     
                 except Exception as create_error:
                     self.logger.error("Failed to create target database or set permissions", 
@@ -675,6 +729,7 @@ class TableSyncOrchestrator:
                     "database.password": self.config['yugabytedb']['password'],
                     "database.dbname": table_info.database,
                     "database.server.name": f"yugabyte-{table_info.database}",
+                    "database.master.addresses": self.config['yugabytedb'].get('debezium_master_addresses', self.config['yugabytedb']['master_addresses']),
                     "table.include.list": f"{table_info.schema}.{table_info.table}",
                     "database.streamid": f"cdcstream_{table_info.schema}_{table_info.table}",
                     "transforms": "unwrap",
@@ -706,6 +761,34 @@ class TableSyncOrchestrator:
                             table=table_info.full_name, error=str(e))
             return False
     
+    def _scan_database(self, database: str) -> Tuple[str, int, int, List[TableInfo]]:
+        """Scan a single database and return results for aggregation."""
+        thread_name = threading.current_thread().name
+        try:
+            self.logger.debug("Starting database scan", 
+                            database=database, 
+                            thread=thread_name)
+            
+            database_start_time = time.time()
+            tables = self._discover_tables(database)
+            database_scan_time = time.time() - database_start_time
+            
+            database_annotated = sum(1 for t in tables if t.annotation and t.annotation.enabled)
+            
+            self.logger.info("Database scan completed", 
+                           database=database,
+                           thread=thread_name,
+                           tables_found=len(tables),
+                           annotated_tables=database_annotated,
+                           scan_time_seconds=round(database_scan_time, 2))
+            
+            # Return results for aggregation by main thread
+            return (database, len(tables), database_annotated, tables)
+            
+        except Exception as e:
+            self.logger.error("Database scan failed", database=database, error=str(e))
+            return (database, 0, 0, [])
+    
     def _scan_and_sync(self):
         """Main scan and sync loop."""
         start_time = time.time()
@@ -713,13 +796,56 @@ class TableSyncOrchestrator:
         try:
             # Discover all databases
             databases = self._discover_databases()
+            self.logger.info("Starting comprehensive database scan", 
+                           database_count=len(databases),
+                           databases=databases)
             self.metrics['tables_scanned'].inc(len(databases))
             
-            for database in databases:
-                # Discover tables in database
-                tables = self._discover_tables(database)
+            # Determine thread pool size
+            max_threads = self.config.get('max_scan_threads', 0)
+            if max_threads <= 0:
+                max_threads = len(databases)  # One thread per database
+            else:
+                max_threads = min(max_threads, len(databases))  # Don't exceed database count
+            
+            self.logger.info("Starting multithreaded database scanning", 
+                           thread_count=max_threads,
+                           databases_to_scan=len(databases))
+            
+            total_tables = 0
+            annotated_tables = 0
+            all_tables = []
+            
+            # Use ThreadPoolExecutor for parallel database scanning
+            with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="db-scan") as executor:
+                # Submit all database scan tasks
+                future_to_database = {
+                    executor.submit(self._scan_database, database): database 
+                    for database in databases
+                }
                 
-                for table_info in tables:
+                # Process completed tasks as they finish
+                for future in as_completed(future_to_database):
+                    database = future_to_database[future]
+                    try:
+                        db_name, table_count, annotated_count, tables = future.result()
+                        total_tables += table_count
+                        annotated_tables += annotated_count
+                        all_tables.extend(tables)
+                        
+                    except Exception as e:
+                        self.logger.error("Database scan thread failed", 
+                                        database=database, error=str(e))
+            
+            self.logger.info("Multithreaded database scanning completed", 
+                           databases_scanned=len(databases),
+                           total_tables_found=total_tables,
+                           annotated_tables_found=annotated_tables,
+                           threads_used=max_threads)
+            
+            # Process all discovered tables sequentially (sync operations)
+            # Note: Sync operations remain sequential to avoid BigQuery/Kafka conflicts
+            for table_info in all_tables:
                     self.metrics['tables_scanned'].inc()
                     
                     # Skip tables without annotations or disabled annotations
@@ -777,9 +903,12 @@ class TableSyncOrchestrator:
             self.metrics['last_scan_time'].set(time.time())
             self.metrics['active_syncs'].set(len([s for s in self.status_table.values() if s.sync_active]))
             
-            self.logger.info("Scan completed", 
+            self.logger.info("Comprehensive scan completed", 
                            duration=scan_duration, 
-                           tables_found=len(self.status_table))
+                           databases_scanned=len(databases),
+                           total_tables_found=total_tables,
+                           annotated_tables_found=annotated_tables,
+                           active_syncs=len([s for s in self.status_table.values() if s.sync_active]))
             
         except Exception as e:
             self.logger.error("Scan failed", error=str(e))
