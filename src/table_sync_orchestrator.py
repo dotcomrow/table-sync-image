@@ -524,28 +524,68 @@ class TableSyncOrchestrator:
             self.logger.error("Failed initial sync", table=table_info.full_name, error=str(e))
             return False
 
-    # ----------------------------- Debezium Connector -----------------------------
-
-    def _create_cdc_connector(self, table_info: TableInfo) -> bool:
+    def _get_cdc_stream_id(self, database: str, schema: str, table: str) -> str:
+        """
+        Fetch the CDC stream ID for a given YugabyteDB table.
+        Returns the stream ID as a string, or None if not found.
+        """
         try:
             yb_cfg = self.config.get('yugabytedb', {}) or {}
-            connector_name = f"yugabyte-{table_info.database}-{table_info.schema}-{table_info.table}"
-
-            # Debezium master addresses (Debezium-only; not for psycopg2)
-            master_addresses = yb_cfg.get('debezium_master_addresses') or yb_cfg.get('master_addresses', '')
-
-            # Fetch the actual CDC stream ID
-            stream_id = self._get_cdc_stream_id(table_info.database, table_info.schema, table_info.table)
-            if not stream_id:
-                self.logger.error("No valid CDC stream ID found for table", table=table_info.full_name)
-                return False
-
-            connector_config = {
-                "name": connector_name,
-                "config": {
-                    "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-                    "database.hostname": yb_cfg.get('host'),
-                    "database.port": str(yb_cfg.get('port', 5433)),
+            host = yb_cfg.get('host')
+            port = yb_cfg.get('port', 5433)
+            user = yb_cfg.get('user')
+            password = yb_cfg.get('password')
+            # Connect to YugabyteDB
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                dbname=database
+            )
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT stream_id
+                    FROM yb_cdc_stream
+            def _get_cdc_stream_id(self, database: str, schema: str, table: str) -> str:
+                """
+                Fetch the CDC stream ID for a given YugabyteDB table.
+                Returns the stream ID as a string, or None if not found.
+                """
+                try:
+                    yb_cfg = self.config.get('yugabytedb', {}) or {}
+                    host = yb_cfg.get('host')
+                    port = yb_cfg.get('port', 5433)
+                    user = yb_cfg.get('user')
+                    password = yb_cfg.get('password')
+                    # Connect to YugabyteDB
+                    conn = psycopg2.connect(
+                        host=host,
+                        port=port,
+                        user=user,
+                        password=password,
+                        dbname=database
+                    )
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT stream_id
+                            FROM yb_cdc_stream
+                            WHERE namespace_name = %s AND table_name = %s
+                            """,
+                            (schema, table)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            return row[0]
+                except Exception as e:
+                    self.logger.error("Failed to fetch CDC stream ID", database=database, schema=schema, table=table, error=str(e))
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                return None
                     "database.user": yb_cfg.get('user'),
                     "database.password": yb_cfg.get('password'),
                     "database.dbname": table_info.database,
