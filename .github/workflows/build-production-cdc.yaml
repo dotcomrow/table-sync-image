@@ -9,7 +9,7 @@ on:
         default: 'production'
         type: choice
         options:
-        - productiondo 
+        - production 
         - development
 
 permissions:
