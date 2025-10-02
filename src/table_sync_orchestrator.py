@@ -267,8 +267,9 @@ class TableSyncOrchestrator:
             yb['database'] = database
 
         # Map dbname/database preference for psycopg2
-        if 'database' in yb and 'dbname' not in yb:
+        if 'database' in yb:
             yb['dbname'] = yb['database']
+            del yb['database']
 
         # Defaults & tuning
         yb.setdefault('connect_timeout', 5)
@@ -284,7 +285,7 @@ class TableSyncOrchestrator:
         return filtered
 
     def _get_system_db_connection(self):
-        """Try postgres, yugabyte, template1 with filtered DSN."""
+        """Try postgres, yugabyte, template1 with filtered DSN. Uses context manager for safety."""
         system_dbs = ['postgres', 'yugabyte', 'template1']
         base_cfg = self.config.get('yugabytedb', {}) or {}
         for sys_db in system_dbs:
@@ -292,29 +293,35 @@ class TableSyncOrchestrator:
                 kwargs = self._pg_conn_kwargs(base_cfg, database=sys_db)
                 safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
                 self.logger.debug("Attempting system database connection", database=sys_db, config=safe_log)
-                conn = psycopg2.connect(**kwargs)
-                self.logger.info("System database connection established", database=sys_db, user=kwargs.get('user'))
-                return conn
+                with psycopg2.connect(**kwargs) as conn:
+                    self.logger.info("System database connection established", database=sys_db, user=kwargs.get('user'))
+                    return conn
             except Exception as e:
                 self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
         raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
 
     def _get_db_connection_ctx(self, database: str):
-        """Connection pool (simple) with filtered DSN."""
+        """Context manager for DB connection with filtered DSN."""
         @contextmanager
         def get_connection():
-            if database not in self.db_connections or self.db_connections[database].closed:
-                try:
-                    base_cfg = self.config.get('yugabytedb', {}) or {}
-                    kwargs = self._pg_conn_kwargs(base_cfg, database=database)
-                    safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
-                    self.logger.debug("Attempting database connection", database=database, config=safe_log)
-                    self.db_connections[database] = psycopg2.connect(**kwargs)
-                    self.logger.info("Database connection established", database=database, user=kwargs.get('user'))
-                except Exception as e:
-                    self.logger.error("Failed to connect to database", database=database, error=str(e))
-                    raise
-            yield self.db_connections[database]
+            base_cfg = self.config.get('yugabytedb', {}) or {}
+            kwargs = self._pg_conn_kwargs(base_cfg, database=database)
+            safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
+            self.logger.debug("Attempting database connection", database=database, config=safe_log)
+            conn = None
+            try:
+                conn = psycopg2.connect(**kwargs)
+                self.logger.info("Database connection established", database=database, user=kwargs.get('user'))
+                yield conn
+            except Exception as e:
+                self.logger.error("Failed to connect to database", database=database, error=str(e))
+                raise
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         return get_connection()
 
     # ----------------------------- Discovery -----------------------------
