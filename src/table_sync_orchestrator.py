@@ -342,6 +342,24 @@ class TableSyncOrchestrator:
             conn = self._get_system_db_connection()
             try:
                 with conn.cursor() as cur:
+                    # First, check if the vaultadmin user exists and has proper privileges
+                    username = self.config.get('yugabytedb', {}).get('user', 'vaultadmin')
+                    
+                    # Check if user exists
+                    cur.execute("SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
+                    user_result = cur.fetchone()
+                    
+                    if not user_result:
+                        self.logger.warning("Database user does not exist, cannot create database", 
+                                          user=username)
+                        self.logger.info("Please create the user first with: CREATE ROLE vaultadmin WITH LOGIN SUPERUSER PASSWORD 'password'")
+                        return []
+                    
+                    user_name, is_super, can_create_db = user_result
+                    self.logger.info("Database user info", 
+                                   user=user_name, 
+                                   is_superuser=is_super, 
+                                   can_create_db=can_create_db)
                     cur.execute("SELECT datname FROM pg_database WHERE datname = %s", (target_database,))
                     result = cur.fetchone()
                     
@@ -451,7 +469,8 @@ class TableSyncOrchestrator:
                         finally:
                             conn.autocommit = False
             finally:
-                conn.close()
+                if conn and hasattr(conn, 'close'):
+                    conn.close()
                         
         except Exception as e:
             self.logger.error("Failed to discover databases", error=str(e))
