@@ -1,11 +1,15 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 Production Table Sync Orchestrator for YugabyteDB → BigQuery.
 
-Fixes:
+Key points:
 - Filters out non-Postgres DSN keys (e.g., master_addresses) before psycopg2.connect()
 - Adds robust connection options (timeouts, keepalives, application_name)
 - Guards BigQuery ops when client is None
-- Keeps Debezium-only settings strictly in connector creation
+- Creates/ensures Debezium YugabyteDB gRPC connectors (not PG connector)
+- CDC stream id is taken from annotation or config; optional on-the-fly creation via yb-admin
 """
 
 import os
@@ -14,8 +18,10 @@ import signal
 import threading
 import time
 import json
+import subprocess
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -36,6 +42,7 @@ import requests
 class TableAnnotation:
     enabled: bool
     bq_target: str  # "dataset.table"
+    cdc_stream_id: Optional[str] = None  # optional per-table override
 
     @classmethod
     def from_comment(cls, comment: str) -> Optional['TableAnnotation']:
@@ -46,7 +53,8 @@ class TableAnnotation:
                 return None
             return cls(
                 enabled=bool(bootstrap.get('enabled', False)),
-                bq_target=str(bootstrap.get('bq', '')).strip()
+                bq_target=str(bootstrap.get('bq', '')).strip(),
+                cdc_stream_id=(bootstrap.get('cdc_stream_id') or None),
             )
         except Exception:
             return None
@@ -282,7 +290,7 @@ class TableSyncOrchestrator:
         return filtered
 
     def _get_system_db_connection(self):
-        """Try postgres, yugabyte, template1 with filtered DSN. Uses context manager for safety."""
+        """Try postgres, yugabyte, template1 with filtered DSN. Return a live connection."""
         system_dbs = ['postgres', 'yugabyte', 'template1']
         base_cfg = self.config.get('yugabytedb', {}) or {}
         for sys_db in system_dbs:
@@ -362,8 +370,10 @@ class TableSyncOrchestrator:
                             return scannable
                         return [target]
             finally:
-                try: conn.close()
-                except: pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
             # Create target if missing
             return self._create_database_if_needed(target, username)
@@ -412,8 +422,10 @@ class TableSyncOrchestrator:
             return []
         finally:
             try:
-                if 'conn' in locals() and conn: conn.close()
-            except: pass
+                if 'conn' in locals() and conn:
+                    conn.close()
+            except Exception:
+                pass
 
     def _discover_tables(self, database: str) -> List[TableInfo]:
         out: List[TableInfo] = []
@@ -436,12 +448,80 @@ class TableSyncOrchestrator:
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
-    
+
     # ------------------------------ YugabyteDB CDC ------------------------------
-    
+
+    def _get_cdc_stream_id(self, table_info: TableInfo) -> Optional[str]:
+        """
+        Return a Yugabyte CDC stream id for the table's database.
+        Priority:
+          1) annotation.bootstrap.cdc_stream_id
+          2) config.yugabytedb.cdc_stream_id
+          3) (optional) yb-admin list/create if enabled via config:
+               yugabytedb.allow_yb_admin: true
+               yugabytedb.yb_admin_path: "yb-admin" (or full path)
+               yugabytedb.master_addresses: "host1:7100,host2:7100,host3:7100"
+        """
+        # 1) per-table annotation
+        if table_info.annotation and table_info.annotation.cdc_stream_id:
+            return table_info.annotation.cdc_stream_id
+
+        # 2) config-level override
+        yb_cfg = self.config.get("yugabytedb", {}) or {}
+        if yb_cfg.get("cdc_stream_id"):
+            return str(yb_cfg["cdc_stream_id"])
+
+        # 3) optional yb-admin path (idempotent: list first, then create)
+        if not yb_cfg.get("allow_yb_admin"):
+            self.logger.warning("yb-admin disabled; no CDC stream id provided", database=table_info.database)
+            return None
+
+        master_addrs = (
+            yb_cfg.get("master_addresses")
+            or yb_cfg.get("masters")
+            or yb_cfg.get("database.master.addresses")
+        )
+        if not master_addrs:
+            self.logger.error("yb-admin enabled but master_addresses not configured")
+            return None
+
+        yb_admin_bin = yb_cfg.get("yb_admin_path", "yb-admin")
+        namespace = f"ysql.{table_info.database}"
+
+        # list_change_data_streams
+        try:
+            out = subprocess.check_output(
+                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
+                text=True, stderr=subprocess.STDOUT, timeout=15
+            )
+            m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
+            if m:
+                sid = m.group(1)
+                self.logger.info("Found existing CDC stream via yb-admin", database=table_info.database, stream_id=sid)
+                return sid
+        except Exception as e:
+            self.logger.debug("yb-admin list_change_data_streams failed", error=str(e))
+
+        # create_change_data_stream
+        try:
+            out = subprocess.check_output(
+                [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
+                text=True, stderr=subprocess.STDOUT, timeout=15
+            )
+            m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
+            if m:
+                sid = m.group(1)
+                self.logger.info("Created CDC DB stream via yb-admin", database=table_info.database, stream_id=sid)
+                return sid
+            self.logger.error("yb-admin create_change_data_stream returned no stream id", output=out)
+        except Exception as e:
+            self.logger.error("yb-admin create_change_data_stream failed", error=str(e))
+
+        return None
+
     def _create_cdc_connector(self, table_info: TableInfo) -> bool:
         """
-        Ensure a Debezium PG connector exists for this table.
+        Ensure a Debezium YugabyteDB gRPC connector exists for this table's database.
         Idempotent: if connector exists, returns True.
         Uses Kafka Connect REST at config['kafka_connect']['url'].
         """
@@ -453,78 +533,64 @@ class TableSyncOrchestrator:
         db = table_info.database
         sch = table_info.schema
         tbl = table_info.table
-        name = f"debezium_{db}_{sch}_{tbl}".replace('.', '_').replace('-', '_')
+        name = f"debezium_yb_{db}_{sch}_{tbl}".replace('.', '_').replace('-', '_')
 
+        # 1) If already exists, treat as success
         try:
-            # 1) If already exists, treat as success
-            r = requests.get(f"{kc}/connectors/{name}")
+            r = requests.get(f"{kc}/connectors/{name}", timeout=5)
             if r.status_code == 200:
                 self.logger.info("CDC connector already exists", connector=name)
                 return True
+        except Exception as e:
+            self.logger.debug("Connector existence check failed", connector=name, error=str(e))
 
-            # 2) Optional YB CDC stream (only if you truly need it)
-            # NOTE: This call name MUST match the defined helper.
-            stream_id = self._get_cdc_stream_id(db, sch, tbl)
+        # 2) Need a CDC stream id
+        stream_id = self._get_cdc_stream_id(table_info)
+        if not stream_id:
+            self.logger.error("No CDC stream id available; cannot create connector", table=table_info.full_name)
+            return False
 
-            # 3) Build connector config (Debezium PG; tune to your environment)
-            yb = self.config.get('yugabytedb', {}) or {}
-            host = yb.get('host')
-            port = yb.get('port', 5433)
-            user = yb.get('user')
-            password = yb.get('password')
+        # 3) Build connector config for YugabyteDB gRPC connector
+        yb = self.config.get('yugabytedb', {}) or {}
+        host = yb.get('host', '127.0.0.1')
+        port = str(yb.get('port', 5433))
+        master_addrs = (
+            yb.get('database.master.addresses')
+            or yb.get('master_addresses')
+            or f"{host}:7100"
+        )
 
-            if not all([host, port, user, password]):
-                self.logger.error("Missing Yugabyte connection fields for connector creation",
-                                host=bool(host), port=bool(port), user=bool(user), password=bool(password))
-                return False
+        cfg = {
+            "name": name,
+            "config": {
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "tasks.max": "1",
 
-            # Include only the single table (schema-qualified)
-            table_include = f"{sch}.{tbl}"
+                # Yugabyte gRPC-specific settings
+                "database.master.addresses": master_addrs,
+                "database.streamid": stream_id,
 
-            cfg = {
-                "name": name,
-                "config": {
-                    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-                    "tasks.max": "1",
-                    "database.hostname": host,
-                    "database.port": str(port),
-                    "database.user": user,
-                    "database.password": password,
-                    "database.dbname": db,
-                    "database.server.name": f"{db}",
-                    "table.include.list": table_include,
+                # Optional/aux YSQL context
+                "database.dbname": db,
+                "table.include.list": f"{sch}.{tbl}",
 
-                    # Debezium basics / reliability
-                    "plugin.name": "pgoutput",
-                    "slot.name": f"slot_{db}_{sch}_{tbl}",
-                    "publication.name": f"pub_{db}_{sch}_{tbl}",
-                    "snapshot.mode": "initial",
-                    "tombstones.on.delete": "false",
-
-                    # Converters / formats as you prefer
-                    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-                    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                    "key.converter.schemas.enable": "false",
-                    "value.converter.schemas.enable": "false",
-                }
+                # Snapshot/format defaults
+                "snapshot.mode": "initial",             # change to "never" if you only want streaming
+                "tombstones.on.delete": "false",
+                "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "key.converter.schemas.enable": "false",
+                "value.converter.schemas.enable": "false",
             }
+        }
 
-            # If you truly require YB CDC stream wiring, pass it as a custom extension
-            if stream_id:
-                cfg["config"]["yb.cdc.stream.id"] = stream_id
-
-            # 4) Create the connector
-            cr = requests.post(f"{kc}/connectors", json=cfg, timeout=10)
+        # 4) Create the connector
+        try:
+            cr = requests.post(f"{kc}/connectors", json=cfg, timeout=15)
             if cr.status_code in (200, 201):
                 self.logger.info("CDC connector created", connector=name)
                 return True
-
             self.logger.error("Failed to create CDC connector", status=cr.status_code, body=cr.text)
-            return False
-
-        except AttributeError as e:
-            # This catches the exact bug you’re seeing if helper name ever mismatches
-            self.logger.error("Failed to create CDC connector", error=str(e))
             return False
         except Exception as e:
             self.logger.error("Failed to create CDC connector", error=str(e))
@@ -617,28 +683,6 @@ class TableSyncOrchestrator:
             self.logger.error("Failed initial sync", table=table_info.full_name, error=str(e))
             return False
 
-    def _get_cdc_stream_id(self, database: str, schema: str, table: str) -> str:
-        """
-        Fetch the CDC stream ID for a given YugabyteDB table.
-        Returns the stream ID as a string, or None if not found.
-        """
-        try:
-            with self._get_db_connection_ctx(database) as conn, conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT stream_id
-                    FROM yb_cdc_streams
-                    WHERE namespace_name = %s AND table_name = %s
-                    """,
-                    (schema, table)
-                )
-                row = cur.fetchone()
-                if row and row[0] and len(row[0]) == 32:
-                    return row[0]
-        except Exception as e:
-            self.logger.error("Failed to fetch CDC stream ID", database=database, schema=schema, table=table, error=str(e))
-        return None
-
     # ----------------------------- Scanning / Sync Loop -----------------------------
 
     def _scan_database(self, database: str) -> Tuple[str, int, int, List[TableInfo]]:
@@ -663,7 +707,7 @@ class TableSyncOrchestrator:
             databases = self._discover_databases()
             self.logger.info("Starting comprehensive database scan",
                              database_count=len(databases), databases=databases)
-            # the metric was misused before; keep it to count databases processed as a coarse signal
+            # Count databases processed as a coarse signal
             self.metrics['tables_scanned'].inc(len(databases))
 
             max_threads_cfg = int(self.config.get('max_scan_threads', 0) or 0)
@@ -803,8 +847,10 @@ class TableSyncOrchestrator:
     def _cleanup(self):
         self.logger.info("Cleaning up resources")
         for conn in list(self.db_connections.values()):
-            try: conn.close()
-            except: pass
+            try:
+                conn.close()
+            except Exception:
+                pass
         self.logger.info("Table sync orchestrator stopped")
 
 
