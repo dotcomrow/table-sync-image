@@ -1,8 +1,4 @@
 # Test config for local test runs
-kafka:
-  bootstrap_servers: "localhost:9092"
-  connector_name: "test-yugabyte-cdc-connector"
-  topic_name: "test-yugabyte-topic"
 bigquery:
   project_id: "test-gcp-project"
   dataset: "test_dataset"
@@ -15,20 +11,10 @@ yugabyte:
   database: "test_db"
 # Production Table Sync Orchestrator Configuration
 
-# Scanning Configuration
-scan_interval_seconds: ${SCAN_INTERVAL_SECONDS:-30}
-# Enable comprehensive scanning of all databases (vs single target database)
-comprehensive_database_scan: ${COMPREHENSIVE_DATABASE_SCAN:-true}
-# Databases to exclude from scanning (comma-separated list)
-excluded_databases: ${EXCLUDED_DATABASES:-postgres,template0,template1}
-# Maximum number of concurrent database scanning threads (0 = number of databases)
-max_scan_threads: ${MAX_SCAN_THREADS:-0}
-
 # YugabyteDB Connection
-# Note: If DATABASE_URL environment variable is set, it will override these values
-# Format: postgresql://username:password@hostname:port/database
+# Retained only used items
 yugabytedb:
-  host: ${YUGABYTEDB_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}
+  master_addresses: ${YUGABYTEDB_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}
   port: ${YUGABYTEDB_PORT:-5433}
   user: ${YUGABYTEDB_USER:-yugabyte}
   password: ${YUGABYTEDB_PASSWORD:-yugabyte}
@@ -44,26 +30,3 @@ bigquery:
   project_id: ${BIGQUERY_PROJECT_ID:-auto}
   credentials_path: ${GOOGLE_APPLICATION_CREDENTIALS:-/vault/secrets/gcp-key.json}
   location: ${BIGQUERY_LOCATION:-US}
-
-# Kafka Connect Configuration
-kafka_connect:
-  url: ${KAFKA_CONNECT_URL:-http://kafka-connect.kafka.svc.internal.lan:8083}
-
-# Logging Configuration
-logging:
-  level: ${LOG_LEVEL:-INFO}
-  format: json
-
-# Monitoring Configuration
-health_check:
-  port: ${HEALTH_CHECK_PORT:-8080}
-
-metrics:
-  port: ${METRICS_PORT:-8000}
-  enabled: true
-
-# Processing Configuration
-processing:
-  batch_size: ${BATCH_SIZE:-1000}
-  max_retries: ${MAX_RETRIES:-3}
-  retry_delay_seconds: ${RETRY_DELAY_SECONDS:-5}

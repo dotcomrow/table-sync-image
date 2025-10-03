@@ -30,3 +30,5 @@ tenacity==8.2.3              # Retry logic with exponential backoff
 pytest==7.4.3               # Testing framework
 black==23.11.0               # Code formatting
 flake8==6.1.0                # Linting
+
+kafka-python==2.0.2          # Kafka client for testing with Kafka (optional)

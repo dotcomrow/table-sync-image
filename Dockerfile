@@ -72,7 +72,7 @@ WORKDIR /app
 RUN chown cdc_user:cdc_user /app
 
 # --- Python deps (cached layer) ---
-COPY requirements.production.txt ./requirements.txt
+COPY src/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Application code ---

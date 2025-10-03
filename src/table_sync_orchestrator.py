@@ -32,7 +32,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
-from dataclasses import dataclass
 from contextlib import contextmanager
 
 import yaml
@@ -44,82 +43,27 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from flask import Flask, jsonify
 import requests
 
-# Optional Kafka admin (only if you set kafka.bootstrap_servers)
-try:
-    from kafka import KafkaAdminClient
-    from kafka.errors import KafkaError
-    HAVE_KAFKA = True
-except Exception:
-    HAVE_KAFKA = False
+from classes.kafka_connector import KafkaConnector
+from classes.bigquery_manager import BigQueryManager
+from classes.annotation_processor import TableAnnotation, AnnotationProcessor
+from classes.config_reader import ConfigReader, ConfigKeys
+from classes.cdc_manager import CDCManager
+from classes.table_info import TableInfo
+from classes.sync_status import SyncStatus
 
 
-# ----------------------------- Data Models -----------------------------
-
-@dataclass
-class TableAnnotation:
-    enabled: bool
-    bq_target: str  # "dataset.table"
-    cdc_stream_id: Optional[str] = None  # optional per-table override
-
-    @classmethod
-    def from_comment(cls, comment: str) -> Optional['TableAnnotation']:
-        try:
-            data = json.loads(comment)
-            bootstrap = data.get('bootstrap', {})
-            if not isinstance(bootstrap, dict):
-                return None
-            return cls(
-                enabled=bool(bootstrap.get('enabled', False)),
-                bq_target=str(bootstrap.get('bq', '')).strip(),
-                cdc_stream_id=(bootstrap.get('cdc_stream_id') or None),
-            )
-        except Exception:
-            return None
-
-
-@dataclass
-class TableInfo:
-    database: str
-    schema: str
-    table: str
-    annotation: Optional[TableAnnotation]
-
-    @property
-    def full_name(self) -> str:
-        return f"{self.database}.{self.schema}.{self.table}"
-
-    @property
-    def bq_dataset(self) -> Optional[str]:
-        if self.annotation and self.annotation.bq_target and "." in self.annotation.bq_target:
-            return self.annotation.bq_target.split(".", 1)[0]
-        return None
-
-    @property
-    def bq_table(self) -> Optional[str]:
-        if self.annotation and self.annotation.bq_target and "." in self.annotation.bq_target:
-            return self.annotation.bq_target.split(".", 1)[1]
-        return None
-
-
-@dataclass
-class SyncStatus:
-    table_info: TableInfo
-    last_scan: datetime
-    annotation_enabled: bool
-    bigquery_exists: bool
-    connector_exists: bool
-    sync_active: bool
-    last_connector_state: Optional[str] = None
-    last_error: Optional[str] = None
-    expected_topic: Optional[str] = None
-    topic_exists: Optional[bool] = None
-
+HAVE_KAFKA = True
 
 # ----------------------------- Orchestrator -----------------------------
 
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
-        self.config = self._load_config(config_path)
+        self.config_reader = ConfigReader()
+        self.config = self.config_reader.load_config(config_path)
+        self.kafka_connector = KafkaConnector(self.config)
+        self.bigquery_manager = BigQueryManager(self.config)
+        self.annotation_processor = AnnotationProcessor()
+        self.cdc_manager = CDCManager(self.config)
         self.running = False
         self.db_connections: Dict[str, psycopg2.extensions.connection] = {}
         self.bigquery_client: Optional[bigquery.Client] = None
@@ -137,74 +81,11 @@ class TableSyncOrchestrator:
             if not os.getenv('DISABLE_METRICS'):
                 self._start_metrics_server()
 
-    # ----------------------------- Config -----------------------------
-
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
-        try:
-            with open(config_path, 'r') as f:
-                content = f.read()
-
-            def env_replacer(match):
-                spec = match.group(1)
-                if ':-' in spec:
-                    var, default = spec.split(':-', 1)
-                elif ':' in spec:
-                    var, default = spec.split(':', 1)
-                else:
-                    var, default = spec, ''
-                return os.getenv(var, default)
-
-            content = re.sub(r'\$\{([^}]+)\}', env_replacer, content)
-            cfg = yaml.safe_load(content) or {}
-
-            # Allow DATABASE_URL to override yugabytedb section
-            self._parse_database_url(cfg)
-            return cfg
-        except Exception as e:
-            print(f"Failed to load config from {config_path}: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    def _parse_database_url(self, config: Dict[str, Any]):
-        url = os.getenv('DATABASE_URL')
-        if not url:
-            return
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            config.setdefault('yugabytedb', {})
-            yb = config['yugabytedb']
-            if parsed.hostname: yb['host'] = parsed.hostname
-            if parsed.port:     yb['port'] = parsed.port
-            if parsed.username: yb['user'] = parsed.username
-            if parsed.password: yb['password'] = parsed.password
-            if parsed.path and parsed.path != '/':
-                yb['database'] = parsed.path.lstrip('/')
-            print(f"✅ Parsed DATABASE_URL for {parsed.username}@{parsed.hostname}:{parsed.port} → db={yb.get('database','(none)')}")
-        except Exception as e:
-            print(f"Warning: Failed to parse DATABASE_URL: {e}", file=sys.stderr)
-
-    def _derive_project_id(self):
-        bq = self.config.get('bigquery', {}) or {}
-        project_id = bq.get('project_id')
-        if project_id and project_id != 'auto':
-            return
-        try:
-            credentials_path = bq.get('credentials_path')
-            if credentials_path and os.path.exists(credentials_path):
-                with open(credentials_path, 'r') as f:
-                    creds = json.load(f)
-                if 'project_id' in creds:
-                    bq['project_id'] = creds['project_id']
-                    self.config['bigquery'] = bq
-                    print(f"Auto-derived BigQuery project ID: {creds['project_id']}")
-        except Exception as e:
-            print(f"Warning: Could not derive project ID from credentials: {e}", file=sys.stderr)
-
     # ----------------------------- Logging & Metrics -----------------------------
 
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
-        lvl = (self.config.get('logging', {}) or {}).get('level', 'INFO').upper()
+        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING_LEVEL.value, 'INFO').upper()
         numeric = getattr(logging, lvl, logging.INFO)
         structlog.configure(
             processors=[
@@ -232,7 +113,7 @@ class TableSyncOrchestrator:
     # ----------------------------- HTTP logging helpers -----------------------------
 
     def _log_http_bodies_on_failure(self) -> bool:
-        return bool((self.config.get("logging", {}) or {}).get("log_http_bodies_on_failure", True))
+        return bool((self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get("log_http_bodies_on_failure", True))
 
     def _redact(self, data: Any, redact_keys: Optional[set] = None) -> Any:
         DEFAULT = {
@@ -241,7 +122,7 @@ class TableSyncOrchestrator:
             "sasl.jaas.config", "sasl.password", "sasl.mechanism",
         }
         keys = set(DEFAULT)
-        cfg = (self.config.get("logging", {}) or {}).get("redact_keys", [])
+        cfg = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING_REDACT_KEYS.value, [])
         if isinstance(cfg, list):
             keys |= {str(k).lower() for k in cfg}
 
@@ -303,9 +184,9 @@ class TableSyncOrchestrator:
 
     def _init_bigquery_client(self):
         try:
-            bq = self.config.get('bigquery', {}) or {}
-            credentials_path = bq.get('credentials_path')
-            project_id = bq.get('project_id')
+            bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
+            credentials_path = bq.get(ConfigKeys.BIGQUERY_CREDENTIALS_PATH.value)
+            project_id = bq.get(ConfigKeys.BIGQUERY_PROJECT_ID.value)
             if credentials_path and os.path.exists(credentials_path) and project_id:
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
                 self.bigquery_client = bigquery.Client(project=project_id)
@@ -351,14 +232,14 @@ class TableSyncOrchestrator:
             return jsonify({"tables": out, "ts": datetime.utcnow().isoformat()})
 
         def run_server():
-            port = int((self.config.get('health_check', {}) or {}).get('port', 8080))
+            port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(ConfigKeys.HEALTH_CHECK_PORT.value, 8080))
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
-        self.logger.info("Health server started", port=(self.config.get('health_check', {}) or {}).get('port', 8080))
+        self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(ConfigKeys.HEALTH_CHECK_PORT.value, 8080))
 
     def _start_metrics_server(self):
-        port = int((self.config.get('metrics', {}) or {}).get('port', 8000))
+        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get(ConfigKeys.METRICS_PORT.value, 8000))
         start_http_server(port)
         self.logger.info("Metrics server started", port=port)
 
@@ -413,7 +294,7 @@ class TableSyncOrchestrator:
     def _get_db_connection_ctx(self, database: str):
         @contextmanager
         def get_connection():
-            base_cfg = self.config.get('yugabytedb', {}) or {}
+            base_cfg = self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}
             kwargs = self._pg_conn_kwargs(base_cfg, database=database)
             safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
             self.logger.debug("Attempting database connection", database=database, config=safe_log)
@@ -436,7 +317,7 @@ class TableSyncOrchestrator:
     # ----------------------------- Discovery -----------------------------
 
     def _filter_excluded_databases(self, all_databases: List[str]) -> List[str]:
-        ex_cfg = self.config.get('excluded_databases', 'postgres,template0,template1')
+        ex_cfg = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, 'postgres,template0,template1')
         excluded = [d.strip() for d in ex_cfg.split(',')] if isinstance(ex_cfg, str) else (ex_cfg or [])
         kept = [d for d in all_databases if d not in excluded]
         self.logger.debug("Database filtering applied",
@@ -446,12 +327,12 @@ class TableSyncOrchestrator:
         return kept
 
     def _discover_databases(self) -> List[str]:
-        target = (self.config.get('yugabytedb', {}) or {}).get('database', 'kafka')
+        target = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get(ConfigKeys.YUGABYTEDB_DATABASE.value, 'kafka')
         try:
             conn = self._get_system_db_connection()
             try:
                 with conn.cursor() as cur:
-                    username = (self.config.get('yugabytedb', {}) or {}).get('user', 'vaultadmin')
+                    username = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get(ConfigKeys.YUGABYTEDB_USER.value, 'vaultadmin')
                     cur.execute("SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
                     row = cur.fetchone()
                     if not row:
@@ -469,7 +350,7 @@ class TableSyncOrchestrator:
                     cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target,))
                     exists = cur.fetchone() is not None
                     if exists:
-                        if self.config.get('comprehensive_database_scan', True):
+                        if self.config.get(ConfigKeys.COMPREHENSIVE_DATABASE_SCAN.value, True):
                             return scannable
                         return [target]
             finally:
@@ -483,49 +364,6 @@ class TableSyncOrchestrator:
             self.logger.error("Failed to discover databases", error=str(e))
             self.logger.info("Using configured target database (fallback)", database=target)
             return [target]
-
-    def _create_database_if_needed(self, target_database: str, username: str) -> List[str]:
-        try:
-            conn = self._get_system_db_connection()
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                try:
-                    self.logger.info("Attempting to create database", database=target_database, owner=username)
-                    cur.execute(f'CREATE DATABASE "{target_database}" OWNER "{username}"')
-                    self.logger.info("Target database created", database=target_database, owner=username)
-                except Exception as e:
-                    self.logger.error("Failed to create target database", database=target_database, error=str(e))
-
-            with self._get_db_connection_ctx(target_database) as new_conn:
-                new_conn.autocommit = True
-                with new_conn.cursor() as ncur:
-                    ncur.execute(f'ALTER SCHEMA public OWNER TO "{username}"')
-                    ncur.execute(f'GRANT ALL ON SCHEMA public TO "{username}"')
-                    ncur.execute(f'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "{username}"')
-                    ncur.execute(f'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{username}"')
-                    ncur.execute(f'GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO "{username}"')
-                    ncur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{username}"')
-                    ncur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "{username}"')
-                    ncur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO "{username}"')
-                    ncur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO "{username}"')
-                    ncur.execute(f'GRANT CREATE ON DATABASE "{target_database}" TO "{username}"')
-                    self.logger.info("Granted privileges/ownership on new database", database=target_database, user=username)
-
-            if self.config.get('comprehensive_database_scan', True):
-                with self._get_system_db_connection() as conn2, conn2.cursor() as cur2:
-                    cur2.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
-                    all_visible = [r[0] for r in cur2.fetchall()]
-                return self._filter_excluded_databases(all_visible)
-            return [target_database]
-        except Exception as e:
-            self.logger.error("Failed to finalize database creation", error=str(e))
-            return []
-        finally:
-            try:
-                if 'conn' in locals() and conn:
-                    conn.close()
-            except Exception:
-                pass
 
     def _discover_tables(self, database: str) -> List[TableInfo]:
         out: List[TableInfo] = []
@@ -549,681 +387,204 @@ class TableSyncOrchestrator:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
 
-    # ------------------------------ YugabyteDB CDC ------------------------------
+    # ----------------------------- Reconciliation -----------------------------
 
-    def _get_cdc_stream_id(self, table_info: TableInfo) -> Optional[str]:
-        if table_info.annotation and table_info.annotation.cdc_stream_id:
-            return table_info.annotation.cdc_stream_id
+    def _reconcile_connector(self, table_info: TableInfo, existing: SyncStatus):
+        cfg = self._build_connector_config(table_info)
+        name = cfg.get("name")
+        self.logger.info("Reconciliation check", table=table_info.full_name, connector_name=name, existing_status=existing)
 
-        yb_cfg = self.config.get("yugabytedb", {}) or {}
-        if yb_cfg.get("cdc_stream_id"):
-            return str(yb_cfg["cdc_stream_id"])
-
-        master_addrs = (
-            yb_cfg.get("master_addresses")
-            or yb_cfg.get("masters")
-            or yb_cfg.get("database.master.addresses")
-            or os.getenv("YB_MASTER_ADDRESSES")
-        )
-
-        if "allow_yb_admin" in yb_cfg:
-            allow_admin = bool(yb_cfg.get("allow_yb_admin"))
-        else:
-            allow_admin = bool(master_addrs)
-
-        if not allow_admin:
-            self.logger.warning("yb-admin disabled; no CDC stream id provided", database=table_info.database)
-            return None
-
-        if not master_addrs:
-            self.logger.error("yb-admin allowed but master_addresses not configured (config or YB_MASTER_ADDRESSES env)")
-            return None
-
-        yb_admin_bin = yb_cfg.get("yb_admin_path", "yb-admin")
-        namespace = f"ysql.{table_info.database}"
-
-        try:
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
-                text=True, stderr=subprocess.STDOUT, timeout=20
-            )
-            m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
-            if m:
-                sid = m.group(1)
-                self.logger.info("Found existing CDC stream via yb-admin", database=table_info.database, stream_id=sid)
-                return sid
-        except Exception as e:
-            self.logger.debug("yb-admin list_change_data_streams failed", error=str(e))
-
-        try:
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
-                text=True, stderr=subprocess.STDOUT, timeout=20
-            )
-            m = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
-            if m:
-                sid = m.group(1)
-                self.logger.info("Created CDC DB stream via yb-admin", database=table_info.database, stream_id=sid)
-                return sid
-            self.logger.error("yb-admin create_change_data_stream returned no stream id", output=out)
-        except Exception as e:
-            self.logger.error("yb-admin create_change_data_stream failed", error=str(e))
-
-        return None
-
-    # ----------- Kafka Connect helpers ------------
-
-    def _kc_url(self) -> Optional[str]:
-        return (self.config.get('kafka_connect') or {}).get('url')
-
-    def _list_connector_plugins(self) -> List[str]:
-        kc = self._kc_url()
-        if not kc:
-            return []
-        url = f"{kc}/connector-plugins"
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code != 200:
-                self._log_http_failure(method="GET", url=url, resp=r, note="List connector plugins failed")
-                return []
-            payload = r.json() if r.text else []
-            classes = []
-            for item in payload or []:
-                c = item.get("class")
-                if c:
-                    classes.append(str(c))
-            return classes
-        except Exception as e:
-            self._log_http_failure(method="GET", url=url, error=e, note="List connector plugins raised exception")
-            return []
-
-    def _select_yugabyte_connector_class(self) -> Optional[str]:
-        """Choose the installed Yugabyte connector class. Prefer gRPC flavor if present."""
-        plugins = self._list_connector_plugins()
-        grpc_cls = "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector"
-        generic_cls = "io.debezium.connector.yugabytedb.YugabyteDBConnector"
-        chosen = grpc_cls if grpc_cls in plugins else (generic_cls if generic_cls in plugins else None)
-        if not chosen:
-            self.logger.error("No compatible YugabyteDB connector plugin found", available_plugins=plugins)
-            return None
-        self.logger.info("Using Yugabyte connector plugin", connector_class=chosen)
-        return chosen
-
-    def _connector_name(self, table_info: TableInfo) -> str:
-        return f"debezium_yb_{table_info.database}_{table_info.schema}_{table_info.table}".replace('.', '_').replace('-', '_')
-
-    def _connector_exists(self, name: str) -> bool:
-        kc = self._kc_url()
-        if not kc:
-            return False
-        try:
-            r = requests.get(f"{kc}/connectors/{name}", timeout=8)
-            return r.status_code == 200
-        except Exception as e:
-            self._log_http_failure(method="GET", url=f"{kc}/connectors/{name}", error=e, note="Existence check failed")
+        if not self._validate_connector_config(cfg):
+            self.logger.error("Connector config validation failed", config=cfg)
             return False
 
-    def _connector_status(self, name: str) -> Tuple[Optional[str], bool, Optional[str]]:
-        """
-        Returns (overall_state, all_tasks_running, last_error_msg)
-        """
-        kc = self._kc_url()
-        if not kc:
-            return None, False, "Kafka Connect URL not configured"
-        try:
-            r = requests.get(f"{kc}/connectors/{name}/status", timeout=8)
-            if r.status_code != 200:
-                self._log_http_failure(method="GET", url=f"{kc}/connectors/{name}/status", resp=r, note="Status fetch failed")
-                return None, False, f"HTTP {r.status_code}"
-            data = r.json()
-            state = (data.get("connector") or {}).get("state")
-            tasks = data.get("tasks") or []
-            all_running = all((t.get("state") == "RUNNING") for t in tasks) and state == "RUNNING"
-            err = None
-            if not all_running:
-                # pick the first task error if any
-                for t in tasks:
-                    if t.get("state") != "RUNNING":
-                        e = t.get("trace") or t.get("worker_id") or t.get("state")
-                        if e:
-                            err = str(e)
-                            break
-            return state, all_running, err
-        except Exception as e:
-            self._log_http_failure(method="GET", url=f"{kc}/connectors/{name}/status", error=e, note="Status request error")
-            return None, False, str(e)
-
-    def _restart_connector(self, name: str) -> bool:
-        kc = self._kc_url()
-        if not kc:
-            return False
-        url = f"{kc}/connectors/{name}/restart?includeTasks=true&onlyFailed=false"
-        try:
-            r = requests.post(url, timeout=10)
-            if r.status_code in (200, 202, 204):
-                self.logger.info("Requested connector restart", connector=name)
-                return True
-            self._log_http_failure(method="POST", url=url, resp=r, note="Restart failed")
-            return False
-        except Exception as e:
-            self._log_http_failure(method="POST", url=url, error=e, note="Restart exception")
-            return False
-
-    def _delete_connector(self, name: str) -> bool:
-        kc = self._kc_url()
-        if not kc:
-            return False
-        try:
-            r = requests.delete(f"{kc}/connectors/{name}", timeout=10)
-            if r.status_code in (200, 204):
-                self.logger.info("Deleted connector", connector=name)
-                return True
-            self._log_http_failure(method="DELETE", url=f"{kc}/connectors/{name}", resp=r, note="Delete failed")
-            return False
-        except Exception as e:
-            self._log_http_failure(method="DELETE", url=f"{kc}/connectors/{name}", error=e, note="Delete exception")
-            return False
-
-    def _validate_connector_config(self, connector_class: str, name: str, config: Dict[str, str]) -> Tuple[bool, List[str]]:
-        kc = self._kc_url()
-        if not kc:
-            return False, ["Kafka Connect URL not configured"]
-        url = f"{kc}/connector-plugins/{connector_class}/config/validate"
-        payload = {"name": name, "connector.class": connector_class, **config}
-        try:
-            resp = requests.put(url, json=payload, timeout=15)
-            if resp.status_code == 404:
-                resp = requests.post(url, json=payload, timeout=15)
-            if resp.status_code >= 400:
-                self._log_http_failure(method="PUT/POST", url=url, req_json=payload, resp=resp, note="Validate failed HTTP")
-                return False, [f"Validation HTTP {resp.status_code}: {resp.text}"]
-
-            data = resp.json() if resp.text else {}
-            errs: List[str] = []
-            error_count = data.get("error_count")
-            cfgs = data.get("configs") or []
-            for item in cfgs:
-                v = item.get("value") or {}
-                nm = v.get("name")
-                for e in (v.get("errors") or []):
-                    errs.append(f"{nm}: {e}" if nm else str(e))
-
-            if (error_count and int(error_count) > 0) or errs:
-                return False, errs or ["Unknown validation errors"]
-            return True, []
-        except Exception as e:
-            self._log_http_failure(method="PUT/POST", url=url, req_json=payload, error=e, note="Validate raised exception")
-            return False, [f"Validation call failed: {e}"]
-        return False, last_errs or ["Validation failed"]
-
-    # ---------------------- Create Debezium connector ----------------------
-
-    def _create_cdc_connector(self, table_info: TableInfo) -> bool:
-        kc = self._kc_url()
-        if not kc:
-            self.logger.error("Kafka Connect URL not configured")
-            return False
-
-        connector_class = self._select_yugabyte_connector_class()
-        if not connector_class:
-            return False
-
-        name = self._connector_name(table_info)
-        db, sch, tbl = table_info.database, table_info.schema, table_info.table
-
-        # 1) If already exists, treat as success
-        try:
-            url = f"{kc}/connectors/{name}"
-            r = requests.get(url, timeout=5)
-            if r.status_code == 200:
-                self.logger.info("CDC connector already exists", connector=name)
-                return True
-            if r.status_code not in (200, 404):
-                self._log_http_failure(method="GET", url=url, resp=r, note="Unexpected status checking connector existence")
-        except Exception as e:
-            self._log_http_failure(method="GET", url=f"{kc}/connectors/{name}", error=e, note="Existence check raised exception")
-
-        # 2) Need a CDC stream id
-        stream_id = self._get_cdc_stream_id(table_info)
-        if not stream_id:
-            self.logger.error("No CDC stream id available; cannot create connector", table=table_info.full_name)
-            return False
-
-        # 3) Build connector config
-        yb = self.config.get('yugabytedb', {}) or {}
-        host = yb.get('host', '127.0.0.1')
-        port = int(yb.get('port', 5433) or 5433)
-        user = yb.get('user') or ""
-        password = yb.get('password')
-        master_addrs = (
-            yb.get('database.master.addresses')
-            or yb.get('master_addresses')
-            or os.getenv("YB_MASTER_ADDRESSES")
-            or f"{host}:7100"
-        )
-
-        topic_prefix = f"yb_{db}"
-        server_name = topic_prefix  # keeps older DBZ validators happy
-
-        cfg_config: Dict[str, str] = {
-            "connector.class": connector_class,
-            "tasks.max": str(yb.get("tasks_max", 1)),
-
-            # Yugabyte gRPC specifics
-            "database.master.addresses": master_addrs,
-            "database.streamid": stream_id,
-
-            # Debezium naming across versions
-            "topic.prefix": topic_prefix,
-            "database.server.name": server_name,
-
-            # Scope
-            "database.dbname": db,
-            "table.include.list": f"{sch}.{tbl}",
-
-            # Some validators still expect JDBC-ish metadata
-            "database.hostname": host,
-            "database.port": str(port),
-            "database.user": user,
-        }
-        if password:
-            cfg_config["database.password"] = str(password)
-
-        # Snapshot/format defaults
-        cfg_config.update({
-            "snapshot.mode": str(yb.get("snapshot_mode", "initial")),  # "initial" or "never"
-            "tombstones.on.delete": str(yb.get("tombstones_on_delete", "false")).lower(),
-            "key.converter": str(yb.get("key_converter", "org.apache.kafka.connect.json.JsonConverter")),
-            "value.converter": str(yb.get("value_converter", "org.apache.kafka.connect.json.JsonConverter")),
-            "key.converter.schemas.enable": str(yb.get("key_converter_schemas_enable", "false")).lower(),
-            "value.converter.schemas.enable": str(yb.get("value_converter_schemas_enable", "false")).lower(),
-        })
-
-        # Optional Connect-managed topic creation (safer on clusters with strict defaults)
-        tc = (self.config.get("kafka_connect") or {}).get("topic_creation") or {}
-        if isinstance(tc, dict):
-            # Example values: partitions: 3, replication_factor: 3
-            parts = tc.get("default_partitions")
-            repl = tc.get("default_replication_factor")
-            if parts:
-                cfg_config["topic.creation.default.partitions"] = str(parts)
-            if repl:
-                cfg_config["topic.creation.default.replication.factor"] = str(repl)
-            # allow cleanup policy hint if provided
-            if tc.get("default_cleanup_policy"):
-                cfg_config["topic.creation.default.cleanup.policy"] = str(tc.get("default_cleanup_policy"))
-
-        # Optional TLS
-        tls = yb.get("tls") or {}
-        if isinstance(tls, dict):
-            if "enabled" in tls:
-                cfg_config["database.tls.enabled"] = str(bool(tls.get("enabled"))).lower()
-            if tls.get("ca_cert_path"):
-                cfg_config["database.tls.ca.cert.path"] = str(tls["ca_cert_path"])
-            if tls.get("cert_path"):
-                cfg_config["database.tls.cert.path"] = str(tls["cert_path"])
-            if tls.get("key_path"):
-                cfg_config["database.tls.key.path"] = str(tls["key_path"])
-            if tls.get("key_password"):
-                cfg_config["database.tls.key.password"] = str(tls["key_password"])
-
-        # Preflight validation
-        ok, errors = self._validate_connector_config(connector_class, name, cfg_config)
-        if not ok:
-            self.logger.error("Connector config validation failed", connector=name, errors=errors[:20])
-            return False
-
-        # Create the connector
-        # Kafka Connect expects a flat payload for connector creation
-        create_payload = {"name": name, "connector.class": connector_class, **cfg_config}
-        try:
-            url = f"{kc}/connectors"
-            cr = requests.post(url, json=create_payload, timeout=20)
-            if cr.status_code in (200, 201):
-                self.logger.info("CDC connector created", connector=name)
-                return True
-            if cr.status_code == 409:
-                self.logger.info("CDC connector already existed (race)", connector=name)
-                return True
-
-            self._log_http_failure(method="POST", url=url, req_json=create_payload, resp=cr, note="Create connector failed")
-            return False
-        except Exception as e:
-            self._log_http_failure(method="POST", url=f"{kc}/connectors", req_json=create_payload, error=e, note="Create connector raised exception")
-            return False
-
-    # ----------------------------- Kafka topic helpers (optional) -----------------------------
-
-    def _expected_topic_name(self, table_info: TableInfo) -> str:
-        # Debezium usually uses: <topic.prefix>.<schema>.<table>
-        return f"yb_{table_info.database}.{table_info.schema}.{table_info.table}"
-
-    def _check_topic_exists(self, topic: str) -> Optional[bool]:
-        bs = (self.config.get("kafka") or {}).get("bootstrap_servers")
-        if not bs or not HAVE_KAFKA:
-            return None  # not checked
-        try:
-            admin = KafkaAdminClient(bootstrap_servers=bs, client_id="table-sync-orchestrator")
-            topics = admin.list_topics()
-            admin.close()
-            return topic in topics
-        except Exception as e:
-            self.logger.warning("Kafka topic check failed", error=str(e))
-            return None
-
-    # ----------------------------- BigQuery -----------------------------
-
-    def _check_bigquery_exists(self, dataset_id: Optional[str], table_id: Optional[str]) -> bool:
-        if not self.bigquery_client or not dataset_id or not table_id:
-            return False
-        try:
-            self.bigquery_client.get_table(self.bigquery_client.dataset(dataset_id).table(table_id))
+        if existing.connector_exists and existing.last_connector_state == "RUNNING":
+            self.logger.info("Connector already exists and is RUNNING", connector_name=name)
             return True
-        except Exception:
+
+        if existing.connector_exists:
+            self.logger.info("Connector exists but is not RUNNING", connector_name=name, last_state=existing.last_connector_state)
+            if self.config.get(ConfigKeys.RECREATE_FAILED_CONNECTORS.value, False):
+                self.logger.info("Recreating failed connector", connector_name=name)
+                self._kc_delete_connector(name)
+                time.sleep(2)
+                return self._kc_create_connector(name, cfg)
+
+            self.logger.warning("Connector is not RUNNING; manual intervention required", connector_name=name, last_state=existing.last_connector_state)
             return False
 
-    def _map_pg_to_bq_type(self, pg_type: str) -> str:
-        mapping = {
-            'integer': 'INTEGER', 'bigint': 'INTEGER', 'smallint': 'INTEGER',
-            'numeric': 'NUMERIC', 'decimal': 'NUMERIC',
-            'real': 'FLOAT', 'double precision': 'FLOAT',
-            'boolean': 'BOOLEAN',
-            'text': 'STRING', 'varchar': 'STRING', 'char': 'STRING', 'character varying': 'STRING',
-            'timestamp': 'TIMESTAMP', 'timestamp without time zone': 'TIMESTAMP',
-            'timestamptz': 'TIMESTAMP', 'timestamp with time zone': 'TIMESTAMP',
-            'date': 'DATE', 'time': 'TIME',
-            'json': 'JSON', 'jsonb': 'JSON',
-            'uuid': 'STRING',
-        }
-        if pg_type.endswith('[]'):
-            base = pg_type[:-2]
-            return mapping.get(base, 'STRING')
-        return mapping.get(pg_type, 'STRING')
+        self.logger.info("Creating new connector", connector_name=name)
+        return self._kc_create_connector(name, cfg)
 
-    def _get_table_schema(self, table_info: TableInfo) -> List[bigquery.SchemaField]:
-        schema: List[bigquery.SchemaField] = []
-        try:
-            with self._get_db_connection_ctx(table_info.database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
-                    ORDER BY ordinal_position
-                """, (table_info.schema, table_info.table))
-                for row in cur.fetchall():
-                    bq_type = self._map_pg_to_bq_type(row['data_type'])
-                    mode = "NULLABLE" if row['is_nullable'] == 'YES' else "REQUIRED"
-                    schema.append(bigquery.SchemaField(row['column_name'], bq_type, mode=mode))
-        except Exception as e:
-            self.logger.error("Failed to get table schema", table=table_info.full_name, error=str(e))
-        return schema
+    def _reconcile_table(self, table_info: TableInfo):
+        self.logger.info("Starting reconciliation", table=table_info.full_name)
+        status = self.status_table.get(table_info.full_name)
+        if not status:
+            self.logger.warning("No status found for table; skipping reconciliation", table=table_info.full_name)
+            return
 
-    def _create_bigquery_resources(self, table_info: TableInfo) -> bool:
-        if not self.bigquery_client:
-            self.logger.warning("Skipping BigQuery resource creation (client not initialized)",
-                                table=table_info.full_name)
-            return False
-        try:
-            dataset_id = table_info.bq_dataset
-            table_id = table_info.bq_table
-            if not dataset_id or not table_id:
-                return False
+        if status.annotation_enabled and not table_info.annotation:
+            self.logger.info("Enabling annotation for table", table=table_info.full_name)
+            table_info.annotation = TableAnnotation()  # Enable with default settings
 
-            ds_ref = self.bigquery_client.dataset(dataset_id)
+        if not status.connector_exists:
+            self.logger.info("No connector found; creating one", table=table_info.full_name)
+            self._reconcile_connector(table_info, status)
+            return
+
+        self.logger.info("Connector exists; checking status", table=table_info.full_name)
+        conn_status = self._kc_connector_status(status.name)
+        if not conn_status:
+            self.logger.warning("Failed to fetch connector status; assuming absent", connector_name=status.name)
+            status.connector_exists = False
+            return
+
+        tasks_running = sum(1 for t in conn_status.get("tasks", []) if t.get("state") == "RUNNING")
+        if tasks_running == len(conn_status["tasks"]):
+            self.logger.info("All tasks are RUNNING", connector_name=status.name)
+            status.last_connector_state = "RUNNING"
+            return
+
+        self.logger.warning("Some tasks are not RUNNING", connector_name=status.name, tasks=conn_status["tasks"])
+        status.last_connector_state = "PARTIALLY_RUNNING"
+
+    def _reconcile(self):
+        self.logger.info("Starting reconciliation loop")
+        for table_name, status in self.status_table.items():
             try:
-                self.bigquery_client.get_dataset(ds_ref)
-            except Exception:
-                ds = bigquery.Dataset(ds_ref)
-                ds.location = (self.config.get('bigquery', {}) or {}).get('location', 'US')
-                self.bigquery_client.create_dataset(ds)
-                self.logger.info("Created BigQuery dataset", dataset=dataset_id)
+                table_info = status.table_info
+                self._reconcile_table(table_info)
+                self.logger.info("Reconciliation complete", table=table_info.full_name)
+            except Exception as e:
+                self.logger.error("Error during reconciliation", table=table_name, error=str(e))
 
-            tbl_ref = ds_ref.table(table_id)
-            try:
-                self.bigquery_client.get_table(tbl_ref)
-            except Exception:
-                schema = self._get_table_schema(table_info)
-                self.bigquery_client.create_table(bigquery.Table(tbl_ref, schema=schema))
-                self.logger.info("Created BigQuery table", dataset=dataset_id, table=table_id)
-            return True
-        except Exception as e:
-            self.logger.error("Failed to create BigQuery resources", table=table_info.full_name, error=str(e))
-            return False
+    # ----------------------------- Orchestrator Loop -----------------------------
 
-    def _sync_initial_data(self, table_info: TableInfo) -> bool:
+    def _derive_project_id(self):
         try:
-            self.logger.info("Syncing initial data (stub)", table=table_info.full_name)
-            return True
+            bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
+            project_id = bq.get(ConfigKeys.BIGQUERY_PROJECT_ID.value)
+            if project_id:
+                self.logger.info("Project ID derived from config", project_id=project_id)
+                return project_id
+
+            # Attempt to infer project ID from environment
+            if os.getenv("GOOGLE_CLOUD_PROJECT"):
+                inferred = os.getenv("GOOGLE_CLOUD_PROJECT")
+                self.logger.info("Project ID inferred from environment", project_id=inferred)
+                return inferred
+
+            self.logger.warning("No project ID configured or inferred")
         except Exception as e:
-            self.logger.error("Failed initial sync", table=table_info.full_name, error=str(e))
-            return False
+            self.logger.error("Error deriving project ID", error=str(e))
 
-    # ----------------------------- Scanning / Sync Loop -----------------------------
-
-    def _scan_database(self, database: str) -> Tuple[str, int, int, List[TableInfo]]:
-        thread_name = threading.current_thread().name
-        try:
-            self.logger.debug("Starting database scan", database=database, thread=thread_name)
-            t0 = time.time()
-            tables = self._discover_tables(database)
-            annotated = sum(1 for t in tables if t.annotation and t.annotation.enabled)
-            self.logger.info("Database scan completed",
-                             database=database, thread=thread_name,
-                             tables_found=len(tables), annotated_tables=annotated,
-                             scan_time_seconds=round(time.time() - t0, 2))
-            return (database, len(tables), annotated, tables)
-        except Exception as e:
-            self.logger.error("Database scan failed", database=database, error=str(e))
-            return (database, 0, 0, [])
-
-    def _scan_and_sync(self):
-        t0 = time.time()
-        connectors_running = 0
-        try:
-            databases = self._discover_databases()
-            self.logger.info("Starting comprehensive database scan",
-                             database_count=len(databases), databases=databases)
-            if self.metrics:
-                self.metrics['tables_scanned'].inc(len(databases))
-
-            max_threads_cfg = int(self.config.get('max_scan_threads', 0) or 0)
-            max_threads = min(len(databases), max_threads_cfg or len(databases))
-            self.logger.info("Starting multithreaded database scanning",
-                             thread_count=max_threads, databases_to_scan=len(databases))
-
-            total_tables = 0
-            annotated_tables = 0
-            all_tables: List[TableInfo] = []
-
-            with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="db-scan") as ex:
-                futures = {ex.submit(self._scan_database, db): db for db in databases}
-                for fut in as_completed(futures):
-                    db = futures[fut]
-                    try:
-                        _db, cnt, ann, tables = fut.result()
-                        total_tables += cnt
-                        annotated_tables += ann
-                        all_tables.extend(tables)
-                    except Exception as e:
-                        self.logger.error("Database scan thread failed", database=db, error=str(e))
-
-            self.logger.info("Multithreaded database scanning completed",
-                             databases_scanned=len(databases),
-                             total_tables_found=total_tables,
-                             annotated_tables_found=annotated_tables,
-                             threads_used=max_threads)
-
-            active_syncs = 0
-            for ti in all_tables:
-                if not ti.annotation or not ti.annotation.enabled:
-                    continue
-
-                table_key = ti.full_name
-                bq_exists = self._check_bigquery_exists(ti.bq_dataset, ti.bq_table)
-
-                name = self._connector_name(ti)
-                exists = self._connector_exists(name)
-                state, all_running, last_err = (None, False, None)
-                if exists:
-                    state, all_running, last_err = self._connector_status(name)
-                    if all_running:
-                        connectors_running += 1
-                    else:
-                        # Try to heal
-                        if self.config.get("auto_restart_failed_connectors", True):
-                            self._restart_connector(name)
-                            # Re-check quickly
-                            state, all_running, last_err = self._connector_status(name)
-                        if (not all_running) and self.config.get("recreate_failed_connector", False):
-                            if self._delete_connector(name):
-                                exists = False  # fall through to recreate
-
-                needs_sync = (not bq_exists) or (not exists)
-
-                if needs_sync:
-                    self.logger.info("Starting sync for table", table=ti.full_name)
-
-                    if not bq_exists:
-                        if not self._create_bigquery_resources(ti):
-                            self.status_table[table_key] = SyncStatus(
-                                table_info=ti, last_scan=datetime.utcnow(),
-                                annotation_enabled=True, bigquery_exists=False,
-                                connector_exists=False, sync_active=False,
-                                last_connector_state=state, last_error="BigQuery resources not available"
-                            )
-                            continue
-                        if not self._sync_initial_data(ti):
-                            self.status_table[table_key] = SyncStatus(
-                                table_info=ti, last_scan=datetime.utcnow(),
-                                annotation_enabled=True, bigquery_exists=True,
-                                connector_exists=False, sync_active=False,
-                                last_connector_state=state, last_error="Initial data sync failed"
-                            )
-                            continue
-
-                    if not exists:
-                        if not self._create_cdc_connector(ti):
-                            self.status_table[table_key] = SyncStatus(
-                                table_info=ti, last_scan=datetime.utcnow(),
-                                annotation_enabled=True, bigquery_exists=True,
-                                connector_exists=False, sync_active=False,
-                                last_connector_state=state, last_error="CDC connector creation failed"
-                            )
-                            continue
-                        # after creation, check status once
-                        state, all_running, last_err = self._connector_status(name)
-
-                    if self.metrics:
-                        self.metrics['tables_synced'].inc()
-                    active_syncs += 1
-                    self.logger.info("Table sync completed", table=ti.full_name)
-
-                expected_topic = self._expected_topic_name(ti)
-                topic_exists = self._check_topic_exists(expected_topic)
-
-                self.status_table[table_key] = SyncStatus(
-                    table_info=ti,
-                    last_scan=datetime.utcnow(),
-                    annotation_enabled=True,
-                    bigquery_exists=bq_exists or needs_sync,
-                    connector_exists=exists or needs_sync,
-                    sync_active=bool(all_running),
-                    last_connector_state=state,
-                    last_error=last_err,
-                    expected_topic=expected_topic,
-                    topic_exists=topic_exists,
-                )
-
-            if self.metrics:
-                self.metrics['connectors_running'].set(connectors_running)
-                self.metrics['scan_duration'].observe(time.time() - t0)
-                self.metrics['last_scan_time'].set(time.time())
-                self.metrics['active_syncs'].set(active_syncs)
-
-            self.logger.info("Comprehensive scan completed",
-                             duration=time.time() - t0,
-                             databases_scanned=len(databases),
-                             total_tables_found=total_tables,
-                             annotated_tables_found=annotated_tables,
-                             active_syncs=active_syncs,
-                             connectors_running=connectors_running)
-
-        except Exception as e:
-            self.logger.error("Scan failed", error=str(e))
-            if self.metrics:
-                self.metrics['sync_errors'].labels(error_type='scan_error').inc()
-
-    # ----------------------------- Lifecycle -----------------------------
-
-    def run(self):
-        self.running = True
-        self.logger.info("Table sync orchestrator starting")
-
-        def handle(signum, _frame):
-            self.logger.info("Received shutdown signal", signal=signum)
-            self.running = False
-
-        signal.signal(signal.SIGTERM, handle)
-        signal.signal(signal.SIGINT, handle)
-
-        scan_interval = int(self.config.get('scan_interval_seconds', 30) or 30)
-
+    def _table_sync_loop(self, table_info: TableInfo):
+        name = table_info.full_name
+        self.logger.info("Starting table sync loop", table=name)
+        self.status_table[name].sync_active = True
         try:
             while self.running:
-                self._scan_and_sync()
-                for _ in range(scan_interval):
-                    if not self.running:
-                        break
-                    time.sleep(1)
+                start = time.time()
+                self.logger.info("Beginning scan", table=name)
+                try:
+                    # Scan table and detect schema changes
+                    changes = self.cdc_manager.scan_table(table_info)
+                    self.logger.info("Scan complete", table=name, changes=changes)
+
+                    if changes.get("schema_changed"):
+                        self.logger.info("Schema change detected; updating BigQuery table", table=name)
+                        self.bigquery_manager.update_table_schema(table_info, changes["schema"])
+                        self.logger.info("BigQuery table schema updated", table=name)
+                    else:
+                        self.logger.info("No schema changes detected", table=name)
+
+                    # Sync data to BigQuery
+                    self.bigquery_manager.sync_table_data(table_info)
+                    self.logger.info("Data sync complete", table=name)
+                    self.status_table[name].last_scan = datetime.utcnow()
+                except Exception as e:
+                    self.logger.error("Error during table sync", table=name, error=str(e))
+                    self.status_table[name].last_error = str(e)
+                finally:
+                    elapsed = time.time() - start
+                    self.logger.info("Scan loop complete", table=name, elapsed_time=elapsed)
+                    time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL.value, 10) - elapsed))
         except Exception as e:
-            self.logger.error("Orchestrator failed", error=str(e))
-            sys.exit(1)
+            self.logger.error("Unexpected error in table sync loop", table=name, error=str(e))
         finally:
-            self._cleanup()
+            self.logger.info("Table sync loop exiting", table=name)
+            self.status_table[name].sync_active = False
 
-    def _cleanup(self):
-        self.logger.info("Cleaning up resources")
-        for conn in list(self.db_connections.values()):
-            try:
-                conn.close()
-            except Exception:
-                pass
-        self.logger.info("Table sync orchestrator stopped")
+    def start(self):
+        self.logger.info("Starting orchestrator")
+        self.running = True
+        try:
+            # Discover databases and create connectors as needed
+            databases = self._discover_databases()
+            self.logger.info("Databases discovered", databases=databases)
 
+            for db in databases:
+                tables = self._discover_tables(db)
+                self.logger.info("Tables discovered", database=db, tables=[t.table_name for t in tables])
 
-# ----------------------------- Entrypoint -----------------------------
+                for table_info in tables:
+                    # Initialize status entry
+                    if table_info.full_name not in self.status_table:
+                        self.status_table[table_info.full_name] = SyncStatus(table_info=table_info)
+
+                    status = self.status_table[table_info.full_name]
+                    status.annotation_enabled = bool(table_info.annotation)
+                    status.bigquery_exists = self.bigquery_manager.table_exists(table_info)
+                    status.connector_exists = False
+                    status.last_connector_state = "UNKNOWN"
+
+                    # Check for existing connector
+                    if status.bigquery_exists:
+                        self.logger.info("BigQuery table exists", table=table_info.full_name)
+                        if self.config.get(ConfigKeys.AUTO_CREATE_CONNECTORS.value, True):
+                            self.logger.info("Auto-creating connector for existing table", table=table_info.full_name)
+                            self._reconcile_connector(table_info, status)
+                    else:
+                        self.logger.info("BigQuery table does not exist", table=table_info.full_name)
+
+            self.logger.info("Starting table sync loops")
+            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.MAX_PARALLEL_SYNCS.value, 4)) as executor:
+                futures = {executor.submit(self._table_sync_loop, ti): ti for ti in self.status_table.values()}
+
+                for future in as_completed(futures):
+                    ti = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        self.logger.error("Error in table sync loop", table=ti.full_name, error=str(e))
+        except Exception as e:
+            self.logger.error("Unexpected error in orchestrator", error=str(e))
+        finally:
+            self.running = False
+            self.logger.info("Orchestrator stopped")
+
+# ----------------------------- Main Entry -----------------------------
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == '--test':
-        print("Table Sync Orchestrator - Test Mode")
-        cfg_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
-        try:
-            def env_replacer(match):
-                spec = match.group(1)
-                if ':-' in spec:
-                    var, default = spec.split(':-', 1)
-                elif ':' in spec:
-                    var, default = spec.split(':', 1)
-                else:
-                    var, default = spec, ''
-                return os.getenv(var, default)
-            with open(cfg_path, 'r') as f:
-                content = f.read()
-            content = re.sub(r'\$\{([^}]+)\}', env_replacer, content)
-            _ = yaml.safe_load(content)
-            print("✅ Configuration file parsing: OK")
-            print("✅ Python dependencies: OK")
-            print("✅ Container structure: OK")
-            print("✅ YAML environment substitution: OK")
-            return
-        except Exception as e:
-            print(f"❌ Configuration test failed: {e}")
-            sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="Table Sync Orchestrator for YugabyteDB → BigQuery")
+    parser.add_argument("config", help="Path to the configuration file")
+    parser.add_argument("--no-start", action="store_true", help="Load config and exit (for testing)")
+    args = parser.parse_args()
 
-    cfg_path = os.getenv('CONFIG_PATH', '/app/config/orchestrator.yaml')
-    orchestrator = TableSyncOrchestrator(cfg_path)
-    orchestrator.run()
+    orchestrator = TableSyncOrchestrator(args.config, start_servers=not args.no_start)
+    if args.no_start:
+        print("Config loaded, ready for testing")
+        sys.exit(0)
 
+    try:
+        orchestrator.start()
+    except KeyboardInterrupt:
+        print("Stopping orchestrator...")
+        orchestrator.running = False
+    except Exception as e:
+        print(f"Unexpected error in orchestrator: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

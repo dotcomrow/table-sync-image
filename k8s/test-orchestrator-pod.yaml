@@ -7,7 +7,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: orchestrator-test
-      image: ghcr.io/dotcomrow/table-sync-image:ts-20251003-004140
+  image: ghcr.io/dotcomrow/table-sync-image:ts-20251003-020926
       imagePullPolicy: IfNotPresent
       env:
         - name: KAFKA_CONNECT_URL
