@@ -403,7 +403,7 @@ class TableSyncOrchestrator:
 
         if existing.connector_exists:
             self.logger.info("Connector exists but is not RUNNING", connector_name=name, last_state=existing.last_connector_state)
-            if self.config.get(ConfigKeys.RECREATE_FAILED_CONNECTORS.value, False):
+            if self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get("recreate_failed_connectors", False):
                 self.logger.info("Recreating failed connector", connector_name=name)
                 self._kc_delete_connector(name)
                 time.sleep(2)
@@ -459,10 +459,10 @@ class TableSyncOrchestrator:
 
     # ----------------------------- Orchestrator Loop -----------------------------
     def _build_connector_config(self, table_info: TableInfo) -> Dict[str, Any]:
-        base_cfg = self.config.get(ConfigKeys.CONNECTOR_CONFIG.value, {}) or {}
+        base_cfg = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}) or {}
         cfg = dict(base_cfg)  # Start with base config
 
-        topic_prefix = (self.config.get(ConfigKeys.TOPIC_PREFIX.value, "ybcdc") or "").strip()
+        topic_prefix = (cfg.get("topic_prefix", "ybcdc") or "").strip()
         if not topic_prefix:
             topic_prefix = "ybcdc"
         server_name = f"{table_info.database}_{table_info.schema}_{table_info.table}"
@@ -541,14 +541,14 @@ class TableSyncOrchestrator:
                     # Sync data to BigQuery
                     self.bigquery_manager.sync_table_data(table_info)
                     self.logger.info("Data sync complete", table=name)
-                    self.status_table[name].last_scan = datetime.utcnow()
+                    self.status_table[name].last_scan = datetime.now()
                 except Exception as e:
                     self.logger.error("Error during table sync", table=name, error=str(e))
                     self.status_table[name].last_error = str(e)
                 finally:
                     elapsed = time.time() - start
                     self.logger.info("Scan loop complete", table=name, elapsed_time=elapsed)
-                    time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL.value, 10) - elapsed))
+                    time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value, 10) - elapsed))
         except Exception as e:
             self.logger.error("Unexpected error in table sync loop", table=name, error=str(e))
         finally:
@@ -570,25 +570,31 @@ class TableSyncOrchestrator:
                 for table_info in tables:
                     # Initialize status entry
                     if table_info.full_name not in self.status_table:
-                        self.status_table[table_info.full_name] = SyncStatus(table_info=table_info)
+                        
+                        # Check for existing connector by querying Kafka
+                        connector_name = f"ybcdc-{table_info.database}_{table_info.schema}_{table_info.table}"
+                        connector_exists = self.kafka_connector.check_connector_exists(connector_name)
+                        connector_exists = None
+                        sync_active = False
 
-                    status = self.status_table[table_info.full_name]
-                    status.annotation_enabled = bool(table_info.annotation)
-                    status.bigquery_exists = self.bigquery_manager.table_exists(table_info)
-                    status.connector_exists = False
-                    status.last_connector_state = "UNKNOWN"
-
-                    # Check for existing connector
-                    if status.bigquery_exists:
-                        self.logger.info("BigQuery table exists", table=table_info.full_name)
-                        if self.config.get(ConfigKeys.AUTO_CREATE_CONNECTORS.value, True):
-                            self.logger.info("Auto-creating connector for existing table", table=table_info.full_name)
-                            self._reconcile_connector(table_info, status)
-                    else:
-                        self.logger.info("BigQuery table does not exist", table=table_info.full_name)
+                        if connector_exists:
+                            self.logger.info("Connector already exists for table", table=table_info.full_name)
+                            connector_exists = True
+                            sync_active = True
+                        else:
+                            connector_exists = False
+                        
+                        self.status_table[table_info.full_name] = SyncStatus(
+                            table_info=table_info,
+                            last_scan=table_info.last_scan,
+                            annotation_enabled=bool(table_info.annotation),
+                            bigquery_exists=self.bigquery_manager.table_exists(table_info),
+                            connector_exists=connector_exists,
+                            sync_active=sync_active
+                        )
 
             self.logger.info("Starting table sync loops")
-            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.MAX_PARALLEL_SYNCS.value, 4)) as executor:
+            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                 futures = {executor.submit(self._table_sync_loop, ti): ti for ti in self.status_table.values()}
 
                 for future in as_completed(futures):
