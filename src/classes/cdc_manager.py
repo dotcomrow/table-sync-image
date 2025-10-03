@@ -4,7 +4,7 @@ import os
 import requests
 from typing import List, Optional
 from enum import Enum
-from classes.config_reader import ConfigKeys
+from classes.config_reader import ConfigKeys, KafkaConnectKeys
 
 class CDCManager:
     def __init__(self, config):
@@ -14,7 +14,7 @@ class CDCManager:
         if table_info.annotation and table_info.annotation.cdc_stream_id:
             return table_info.annotation.cdc_stream_id
 
-        yb_cfg = self.config.get("yugabytedb", {}) or {}
+        yb_cfg = self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}
         if yb_cfg.get(ConfigKeys.CDC_STREAM_ID.value):
             return str(yb_cfg[ConfigKeys.CDC_STREAM_ID.value])
 
@@ -105,7 +105,7 @@ class CDCManager:
             raise RuntimeError(f"Failed to delete connector: {response.text}")
 
     def _kc_url(self) -> Optional[str]:
-        return (self.config.get('kafka_connect') or {}).get('url')
+        return (self.config.get(ConfigKeys.KAFKA_CONNECT.value) or {}).get(KafkaConnectKeys.URL.value)
 
     def _list_connector_plugins(self) -> List[str]:
         kc = self._kc_url()

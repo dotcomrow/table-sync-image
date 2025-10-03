@@ -9,7 +9,6 @@ class ConfigKeys(Enum):
     SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
     COMPREHENSIVE_DATABASE_SCAN = "comprehensive_database_scan"
     EXCLUDED_DATABASES = "excluded_databases"
-    MAX_SCAN_THREADS = "max_scan_threads"
     YUGABYTEDB = "yugabytedb"
     BIGQUERY = "bigquery"
     KAFKA_CONNECT = "kafka_connect"
@@ -25,6 +24,44 @@ class ConfigKeys(Enum):
     ALLOW_YB_ADMIN = "allow_yb_admin"
     KAFKA_CONNECT_URL = "kafka_connect.url"
     DATABASE_MASTER_ADDRESSES = "database.master.addresses"
+    
+class YugabyteDBKeys(Enum):
+    MASTER_ADDRESSES = "master_addresses"
+    YB_ADMIN_PATH = "yb_admin_path"
+    HOST = "host"
+    PORT = "port"
+    USER = "user"
+    PASSWORD = "password"
+    DATABASE = "database"
+    
+class BigQueryKeys(Enum):
+    PROJECT_ID = "project_id"
+    DATASET = "dataset"
+    CREDENTIALS_PATH = "credentials_path"
+    
+class KafkaConnectKeys(Enum):
+    URL = "url"
+    RECREATE_FAILED_CONNECTORS = "recreate_failed_connectors"
+    
+class LoggingKeys(Enum):
+    LEVEL = "level"
+    FORMAT = "format"
+    LOG_BODIES_ON_FAILURE = "log_http_bodies_on_failure"
+    
+class HealthCheckKeys(Enum):
+    ENABLED = "enabled"
+    PORT = "port"
+    
+class MetricsKeys(Enum):
+    ENABLED = "enabled"
+    PORT = "port"
+    
+class ProcessingKeys(Enum):
+    MAX_WORKERS = "max_workers"
+    BATCH_SIZE = "batch_size"
+    MAX_RETRIES = "max_retries"
+    RETRY_DELAY_SECONDS = "retry_delay_seconds"
+    MAX_SCAN_THREADS = "max_scan_threads"
 
 class ConfigReader:
     def __init__(self, config_path):
@@ -47,6 +84,15 @@ class ConfigReader:
 
             content = re.sub(r'\$\{([^}]+)\}', env_replacer, content)
             cfg = yaml.safe_load(content) or {}
+
+            # Overwrite the get method to only accept Enums
+            class ConfigDict(dict):
+                def get(self, key, default=None):
+                    if not isinstance(key, Enum):
+                        raise TypeError("Config keys must be instances of Enum")
+                    return super().get(key.value, default)
+
+            cfg = ConfigDict(cfg)
 
             # Allow DATABASE_URL to override yugabytedb section
             self.parse_database_url(cfg)

@@ -139,3 +139,65 @@ class BigQueryManager:
             cur2.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
             all_visible = [r[0] for r in cur2.fetchall()]
         return self._filter_excluded_databases(all_visible)
+
+    def scan_table(self, yugabyte_manager, table_info) -> bool:
+        """
+        Detect if the table in BigQuery is different from the schema in YugabyteDB.
+
+        Args:
+            yugabyte_manager: An instance of YugabyteDBManager for database operations.
+            table_info: An object containing database, schema, and table information.
+
+        Returns:
+            bool: True if schemas differ, False otherwise.
+        """
+        yugabyte_schema = yugabyte_manager.get_table_schema(table_info)
+
+        dataset_id = table_info.schema
+        table_id = table_info.table
+        bigquery_table = self.client.get_table(self.client.dataset(dataset_id).table(table_id))
+
+        bigquery_schema = {field.name: field.field_type for field in bigquery_table.schema}
+        yugabyte_schema_dict = {field.name: field.field_type for field in yugabyte_schema}
+
+        return bigquery_schema != yugabyte_schema_dict
+
+    def update_table_schema(self, yugabyte_manager, table_info, schema_changes):
+        """
+        Update the schema in BigQuery to match the schema in YugabyteDB safely.
+
+        Args:
+            yugabyte_manager: An instance of YugabyteDBManager for database operations.
+            table_info: An object containing database, schema, and table information.
+        """
+        yugabyte_schema = yugabyte_manager.get_table_schema(table_info)
+
+        dataset_id = table_info.schema
+        table_id = table_info.table
+        table_ref = self.client.dataset(dataset_id).table(table_id)
+        bigquery_table = self.client.get_table(table_ref)
+
+        # Update schema safely
+        bigquery_table.schema = yugabyte_schema
+        self.client.update_table(bigquery_table)
+
+    def sync_table_data(self, yugabyte_manager, table_info):
+        """
+        Sync data from the YugabyteDB table to the BigQuery table.
+
+        Args:
+            yugabyte_manager: An instance of YugabyteDBManager for database operations.
+            table_info: An object containing database, schema, and table information.
+        """
+        dataset_id = table_info.schema
+        table_id = table_info.table
+
+        query = f"""
+        INSERT INTO `{dataset_id}.{table_id}`
+        SELECT * FROM EXTERNAL_QUERY(
+            "{self.config.get(ConfigKeys.YUGABYTEDB_EXTERNAL_CONNECTION.value)}",
+            "SELECT * FROM {table_info.schema}.{table_info.table}"
+        )
+        """
+        job = self.client.query(query)
+        job.result()  # Wait for the job to complete

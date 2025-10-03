@@ -46,10 +46,11 @@ import requests
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
 from classes.annotation_processor import TableAnnotation, AnnotationProcessor
-from classes.config_reader import ConfigReader, ConfigKeys
+from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, BigQueryKeys, HealthCheckKeys, MetricsKeys, KafkaConnectKeys
 from classes.cdc_manager import CDCManager
 from classes.table_info import TableInfo
 from classes.sync_status import SyncStatus
+from classes.yugabyte_db_manager import YugabyteDBManager
 
 
 HAVE_KAFKA = True
@@ -58,8 +59,9 @@ HAVE_KAFKA = True
 
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
-        self.config_reader = ConfigReader(config_path)
-        self.config = self.config_reader.load_config()
+        self.config = ConfigReader(config_path).load_config()
+        self.logger = self._init_logger()
+        self.yugabyte_manager = YugabyteDBManager(self.config)
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
         self.annotation_processor = AnnotationProcessor()
@@ -85,7 +87,7 @@ class TableSyncOrchestrator:
 
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
-        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.value, {}).get("level", "INFO").upper()
+        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.value, {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
         numeric = getattr(logging, lvl, logging.INFO)
         structlog.configure(
             processors=[
@@ -113,7 +115,7 @@ class TableSyncOrchestrator:
     # ----------------------------- HTTP logging helpers -----------------------------
 
     def _log_http_bodies_on_failure(self) -> bool:
-        return bool((self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get("log_http_bodies_on_failure", True))
+        return bool((self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(LoggingKeys.LOG_BODIES_ON_FAILURE.value, True))
 
     def _redact(self, data: Any, redact_keys: Optional[set] = None) -> Any:
         DEFAULT = {
@@ -184,8 +186,8 @@ class TableSyncOrchestrator:
 
     def _init_bigquery_client(self):
         try:
-            credentials_path = self.config.get(ConfigKeys.BIGQUERY.value, {}).get("credentials_path", "/vault/secrets/gcp-key.json")
-            project_id = self.config.get(ConfigKeys.BIGQUERY.value, {}).get("project_id", None)
+            credentials_path = self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.CREDENTIALS_PATH.value, "/vault/secrets/gcp-key.json")
+            project_id = self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.PROJECT_ID.value, None)
             if credentials_path and os.path.exists(credentials_path) and project_id:
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
                 self.bigquery_client = bigquery.Client(project=project_id)
@@ -231,14 +233,14 @@ class TableSyncOrchestrator:
             return jsonify({"tables": out, "ts": datetime.utcnow().isoformat()})
 
         def run_server():
-            port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get("port", 8080))
+            port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
-        self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get("port", 8080))
+        self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
 
     def _start_metrics_server(self):
-        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get("port", 8000))
+        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get(MetricsKeys.PORT.value, 8000))
         start_http_server(port)
         self.logger.info("Metrics server started", port=port)
 
@@ -276,19 +278,7 @@ class TableSyncOrchestrator:
         return filtered
 
     def _get_system_db_connection(self):
-        system_dbs = ['postgres', 'yugabyte', 'template1']
-        base_cfg = self.config.get('yugabytedb', {}) or {}
-        for sys_db in system_dbs:
-            try:
-                kwargs = self._pg_conn_kwargs(base_cfg, database=sys_db)
-                safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
-                self.logger.debug("Attempting system database connection", database=sys_db, config=safe_log)
-                conn = psycopg2.connect(**kwargs)
-                self.logger.info("System database connection established", database=sys_db, user=kwargs.get('user'))
-                return conn
-            except Exception as e:
-                self.logger.debug("Failed to connect to system database", database=sys_db, error=str(e))
-        raise Exception("Could not connect to any system database (postgres, yugabyte, template1)")
+        return self.yugabyte_manager.get_system_db_connection()
 
     def _get_db_connection_ctx(self, database: str):
         @contextmanager
@@ -326,43 +316,8 @@ class TableSyncOrchestrator:
         return kept
 
     def _discover_databases(self) -> List[str]:
-        target = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get("database", "kafka")
-        try:
-            conn = self._get_system_db_connection()
-            try:
-                with conn.cursor() as cur:
-                    username = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get("user", "vaultadmin")
-                    cur.execute("SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
-                    row = cur.fetchone()
-                    if not row:
-                        self.logger.warning("Database user does not exist; cannot create databases", user=username)
-                        return []
-
-                    cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
-                    all_visible = [r[0] for r in cur.fetchall()]
-                    scannable = self._filter_excluded_databases(all_visible)
-                    self.logger.info("Database discovery completed",
-                                     total_visible=len(all_visible),
-                                     scannable_databases=len(scannable),
-                                     databases=scannable)
-
-                    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target,))
-                    exists = cur.fetchone() is not None
-                    if exists:
-                        if self.config.get(ConfigKeys.COMPREHENSIVE_DATABASE_SCAN.value, True):
-                            return scannable
-                        return [target]
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-            return self._create_database_if_needed(target, username)
-        except Exception as e:
-            self.logger.error("Failed to discover databases", error=str(e))
-            self.logger.info("Using configured target database (fallback)", database=target)
-            return [target]
+        excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
+        return self.yugabyte_manager.discover_databases(excluded)
 
     def _discover_tables(self, database: str) -> List[TableInfo]:
         out: List[TableInfo] = []
@@ -403,7 +358,7 @@ class TableSyncOrchestrator:
 
         if existing.connector_exists:
             self.logger.info("Connector exists but is not RUNNING", connector_name=name, last_state=existing.last_connector_state)
-            if self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get("recreate_failed_connectors", False):
+            if self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.RECREATE_FAILED_CONNECTORS.value, False):
                 self.logger.info("Recreating failed connector", connector_name=name)
                 self._kc_delete_connector(name)
                 time.sleep(2)
@@ -518,8 +473,8 @@ class TableSyncOrchestrator:
         except Exception as e:
             self.logger.error("Error deriving project ID", error=str(e))
 
-    def _table_sync_loop(self, table_info: TableInfo):
-        name = table_info.full_name
+    def _table_sync_loop(self, table_info: SyncStatus):
+        name = table_info.table
         self.logger.info("Starting table sync loop", table=name)
         self.status_table[name].sync_active = True
         try:
@@ -528,18 +483,18 @@ class TableSyncOrchestrator:
                 self.logger.info("Beginning scan", table=name)
                 try:
                     # Scan table and detect schema changes
-                    changes = self.cdc_manager.scan_table(table_info)
+                    changes = self.bigquery_manager.scan_table(self.yugabyte_manager, table_info)
                     self.logger.info("Scan complete", table=name, changes=changes)
 
                     if changes.get("schema_changed"):
                         self.logger.info("Schema change detected; updating BigQuery table", table=name)
-                        self.bigquery_manager.update_table_schema(table_info, changes["schema"])
+                        self.bigquery_manager.update_table_schema(self.yugabyte_manager, table_info, changes["schema"])
                         self.logger.info("BigQuery table schema updated", table=name)
                     else:
                         self.logger.info("No schema changes detected", table=name)
 
                     # Sync data to BigQuery
-                    self.bigquery_manager.sync_table_data(table_info)
+                    self.bigquery_manager.sync_table_data(self.yugabyte_manager, table_info)
                     self.logger.info("Data sync complete", table=name)
                     self.status_table[name].last_scan = datetime.now()
                 except Exception as e:
@@ -594,7 +549,7 @@ class TableSyncOrchestrator:
                         )
 
             self.logger.info("Starting table sync loops")
-            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                 futures = {executor.submit(self._table_sync_loop, ti): ti for ti in self.status_table.values()}
 
                 for future in as_completed(futures):

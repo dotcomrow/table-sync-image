@@ -2,14 +2,14 @@ import requests
 import re
 import subprocess
 import os
-from classes.config_reader import ConfigKeys
+from classes.config_reader import ConfigKeys,KafkaConnectKeys, YugabyteDBKeys
 
 class KafkaConnector:
     def __init__(self, config):
         self.config = config
 
     def create_cdc_connector(self, table_info):
-        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get('url')
+        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             raise ValueError("Kafka Connect URL not configured")
 
@@ -33,7 +33,7 @@ class KafkaConnector:
             raise RuntimeError(f"Failed to create connector: {response.text}")
 
     def delete_cdc_connector(self, connector_name):
-        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get('url')
+        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             raise ValueError("Kafka Connect URL not configured")
 
@@ -44,13 +44,13 @@ class KafkaConnector:
 
     def get_cdc_stream_id(self, table_info):
         master_addrs = (
-            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get("master_addresses")
+            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
         )
         if not master_addrs:
             raise ValueError("Master addresses not configured")
 
-        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get("yb_admin_path", "yb-admin")
+        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
         namespace = f"ysql.{table_info.database}"
 
         try:
@@ -87,7 +87,7 @@ class KafkaConnector:
         Returns:
             bool: True if the connector exists, False otherwise.
         """
-        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get('url')
+        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             raise ValueError("Kafka Connect URL not configured")
 
