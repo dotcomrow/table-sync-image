@@ -85,7 +85,7 @@ class TableSyncOrchestrator:
 
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
-        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING_LEVEL.value, 'INFO').upper()
+        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.level.value, 'INFO').upper()
         numeric = getattr(logging, lvl, logging.INFO)
         structlog.configure(
             processors=[
