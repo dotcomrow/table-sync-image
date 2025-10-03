@@ -58,7 +58,7 @@ HAVE_KAFKA = True
 
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
-        self.config_reader = ConfigReader()
+        self.config_reader = ConfigReader(config_path)
         self.config = self.config_reader.load_config(config_path)
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
