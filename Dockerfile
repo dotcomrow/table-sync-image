@@ -13,9 +13,11 @@ ARG GIT_TAG
 #    --build-arg YB_VERSION=2.20.0.0 --build-arg YB_BUILD=42
 # 3) Or just version (auto-discover build by scraping the release index page):
 #    --build-arg YB_VERSION=2.20.0.0
-ARG YB_TARBALL_URL="https://software.yugabyte.com/releases/2025.1.0.1/yugabyte-2025.1.0.1-b3-linux-x86_64.tar.gz"
+
 ARG YB_VERSION="2025.1.0.1"
 ARG YB_BUILD="3"
+ARG YB_ARCH="linux-x86_64"
+ARG YB_DOWNLOAD_URL="https://software.yugabyte.com"
 
 # --- Env ---
 ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
@@ -43,9 +45,9 @@ RUN set -eux; \
     if [ -n "${YB_TARBALL_URL}" ]; then \
       url="${YB_TARBALL_URL}"; \
     elif [ -n "${YB_BUILD}" ]; then \
-      url="https://downloads.yugabyte.com/releases/${YB_VERSION}/yugabyte-${YB_VERSION}-b${YB_BUILD}-${yb_arch}.tar.gz"; \
+      url="${YB_DOWNLOAD_URL}/releases/${YB_VERSION}/yugabyte-${YB_VERSION}-b${YB_BUILD}-${yb_arch}.tar.gz"; \
     else \
-      index="https://downloads.yugabyte.com/releases/${YB_VERSION}/"; \
+      index="${YB_DOWNLOAD_URL}/releases/${YB_VERSION}/"; \
       echo "Discovering Yugabyte tarball via ${index} ..."; \
       # Look for yugabyte-<ver>-b<digits>-<arch>.tar.gz on the index page
       fname="$(curl -fsSL "$index" | grep -Eo "yugabyte-${YB_VERSION}-b[0-9]+-${yb_arch}\.tar\.gz" | head -n1 || true)"; \
