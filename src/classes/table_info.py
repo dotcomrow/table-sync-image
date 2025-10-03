@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
-from src.classes.annotation_processor import TableAnnotation
+from classes.annotation_processor import TableAnnotation
 
 @dataclass
 class TableInfo:
