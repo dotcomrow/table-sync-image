@@ -4,7 +4,6 @@ import subprocess
 import os
 from classes.config_reader import ConfigKeys
 
-
 class KafkaConnector:
     def __init__(self, config):
         self.config = config
@@ -77,3 +76,25 @@ class KafkaConnector:
             raise RuntimeError(f"Failed to create CDC stream: {e}")
 
         return None
+
+    def check_connector_exists(self, connector_name: str) -> bool:
+        """
+        Check if a Kafka connector exists by querying its status endpoint.
+
+        Args:
+            connector_name (str): The name of the connector to check.
+
+        Returns:
+            bool: True if the connector exists, False otherwise.
+        """
+        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get('url')
+        if not kc:
+            raise ValueError("Kafka Connect URL not configured")
+
+        url = f"{kc}/connectors/{connector_name}/status"
+        try:
+            response = requests.get(url, timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.error("Exception while checking connector existence", connector_name=connector_name, error=str(e))
+            return False

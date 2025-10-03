@@ -29,7 +29,7 @@ class AnnotationProcessor:
     def __init__(self):
         pass
 
-    def process_annotations(self, table_info):
+    def process_annotations(self):
         # Implementation migrated from table_sync_orchestrator
         comment = "dummy_comment"  # Replace with actual logic to fetch comment
         try:

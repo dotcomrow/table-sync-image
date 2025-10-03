@@ -17,6 +17,14 @@ class ConfigKeys(Enum):
     HEALTH_CHECK = "health_check"
     METRICS = "metrics"
     PROCESSING = "processing"
+    BIGQUERY_CREDENTIALS_PATH = "bigquery.credentials_path"
+    YUGABYTEDB_MASTER_ADDRESSES = "yugabytedb.master_addresses"
+    YUGABYTEDB_YB_ADMIN_PATH = "yugabytedb.yb_admin_path"
+    YB_ADMIN_PATH = "yb_admin_path"
+    CDC_STREAM_ID = "cdc_stream_id"
+    ALLOW_YB_ADMIN = "allow_yb_admin"
+    KAFKA_CONNECT_URL = "kafka_connect.url"
+    DATABASE_MASTER_ADDRESSES = "database.master.addresses"
 
 class ConfigReader:
     def __init__(self, config_path):

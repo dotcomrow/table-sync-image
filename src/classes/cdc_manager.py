@@ -4,14 +4,7 @@ import os
 import requests
 from typing import List, Optional
 from enum import Enum
-
-class ConfigKeys(Enum):
-    YB_ADMIN_PATH = "yb_admin_path"
-    MASTER_ADDRESSES = "master_addresses"
-    CDC_STREAM_ID = "cdc_stream_id"
-    ALLOW_YB_ADMIN = "allow_yb_admin"
-    KAFKA_CONNECT_URL = "kafka_connect_url"
-    DATABASE_MASTER_ADDRESSES = "database.master.addresses"
+from classes.config_reader import ConfigKeys
 
 class CDCManager:
     def __init__(self, config):
@@ -26,14 +19,14 @@ class CDCManager:
             return str(yb_cfg[ConfigKeys.CDC_STREAM_ID.value])
 
         master_addrs = (
-            yb_cfg.get(ConfigKeys.MASTER_ADDRESSES.value)
+            yb_cfg.get(ConfigKeys.YUGABYTEDB_MASTER_ADDRESSES.value)
             or yb_cfg.get("masters")
             or yb_cfg.get(ConfigKeys.DATABASE_MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
         )
 
         if "allow_yb_admin" in yb_cfg:
-            allow_admin = bool(yb_cfg.get(ConfigKeys.ALLOW_YB_ADMIN.value))
+            allow_admin = bool(yb_cfg.get(ConfigKeys.ALLOW_YB_ADMIN.value, True))
         else:
             allow_admin = bool(master_addrs)
 

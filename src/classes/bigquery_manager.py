@@ -3,13 +3,7 @@ import os
 import subprocess
 import re
 from typing import List
-
-
-class ConfigKeys:
-    BIGQUERY_CREDENTIALS_PATH = "bigquery.credentials_path"
-    YUGABYTEDB_MASTER_ADDRESSES = "yugabytedb.master_addresses"
-    YUGABYTEDB_YB_ADMIN_PATH = "yugabytedb.yb_admin_path"
-
+from classes.config_reader import ConfigKeys
 
 class BigQueryManager:
     def __init__(self, config):
