@@ -92,5 +92,5 @@ EXPOSE 8080
 # --- Entrypoint ---
 ENTRYPOINT ["python", "src/table_sync_orchestrator.py"]
 
-# Set PYTHONPATH to include the src directory
+# Ensure PYTHONPATH is set before the entrypoint
 ENV PYTHONPATH="/app/src"
