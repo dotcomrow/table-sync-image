@@ -565,7 +565,7 @@ class TableSyncOrchestrator:
 
             for db in databases:
                 tables = self._discover_tables(db)
-                self.logger.info("Tables discovered", database=db, tables=[t.table_name for t in tables])
+                self.logger.info("Tables discovered", database=db, tables=[t.table for t in tables])
 
                 for table_info in tables:
                     # Initialize status entry
