@@ -11,7 +11,8 @@ Highlights:
 - Debezium YugabyteDB connector: auto-detects installed class
   (prefers io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector)
 - CDC stream id via annotation/config; else auto list/create via yb-admin if master addresses available
-- Validates connector config before create; includes topic.prefix and sends 'name' in validation body
+- Validates connector config before create; includes topic.prefix + database.server.name
+- Supplies database.hostname/port/user (and password if available) for validators that require them
 - Logs failed HTTP requests to Kafka Connect with redacted payloads and truncated bodies
 """
 
@@ -597,7 +598,6 @@ class TableSyncOrchestrator:
     def _select_yugabyte_connector_class(self) -> Optional[str]:
         """Choose the installed Yugabyte connector class. Prefer gRPC flavor if present."""
         plugins = self._list_connector_plugins()
-        # Common class names across versions
         grpc_cls = "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector"
         generic_cls = "io.debezium.connector.yugabytedb.YugabyteDBConnector"
 
@@ -608,10 +608,7 @@ class TableSyncOrchestrator:
             chosen = generic_cls
 
         if not chosen:
-            self.logger.error(
-                "No compatible YugabyteDB connector plugin found",
-                available_plugins=plugins
-            )
+            self.logger.error("No compatible YugabyteDB connector plugin found", available_plugins=plugins)
             return None
 
         self.logger.info("Using Yugabyte connector plugin", connector_class=chosen)
@@ -647,6 +644,7 @@ class TableSyncOrchestrator:
                     for e in (v.get("errors") or []):
                         errs.append(f"{nm}: {e}" if nm else str(e))
 
+                # If validator insists on older fields for this connector, we'll have already populated them.
                 if (error_count and int(error_count) > 0) or errs:
                     return False, errs or ["Unknown validation errors"]
                 return True, []
@@ -691,9 +689,12 @@ class TableSyncOrchestrator:
             self.logger.error("No CDC stream id available; cannot create connector", table=table_info.full_name)
             return False
 
-        # 3) Build connector config (gRPC mode uses master addresses + stream id)
+        # 3) Build connector config
         yb = self.config.get('yugabytedb', {}) or {}
-        host = yb.get('host', '127.0.0.1')  # only to default master port if env not set
+        host = yb.get('host', '127.0.0.1')
+        port = int(yb.get('port', 5433) or 5433)
+        user = yb.get('user') or ""
+        password = yb.get('password')
         master_addrs = (
             yb.get('database.master.addresses')
             or yb.get('master_addresses')
@@ -702,30 +703,43 @@ class TableSyncOrchestrator:
         )
 
         topic_prefix = f"yb_{db}"
+        server_name = topic_prefix  # compatibility across DBZ versions
 
         cfg_config: Dict[str, str] = {
             "connector.class": connector_class,
             "tasks.max": str(yb.get("tasks_max", 1)),
 
-            # Yugabyte gRPC-specific settings
+            # Yugabyte gRPC specifics
             "database.master.addresses": master_addrs,
             "database.streamid": stream_id,
 
-            # Debezium topic prefix
+            # Debezium naming across versions
             "topic.prefix": topic_prefix,
+            "database.server.name": server_name,
 
-            # Limit to one table
+            # Scope
             "database.dbname": db,
             "table.include.list": f"{sch}.{tbl}",
 
-            # Snapshot/format defaults
+            # Some validator builds still expect JDBC-ish fields for metadata/snapshot
+            "database.hostname": host,
+            "database.port": str(port),
+            "database.user": user,
+            # "database.password" only if provided (avoid forcing empty)
+        }
+
+        if password:
+            cfg_config["database.password"] = str(password)
+
+        # Snapshot/format defaults
+        cfg_config.update({
             "snapshot.mode": str(yb.get("snapshot_mode", "initial")),  # "initial" or "never"
             "tombstones.on.delete": str(yb.get("tombstones_on_delete", "false")).lower(),
             "key.converter": str(yb.get("key_converter", "org.apache.kafka.connect.json.JsonConverter")),
             "value.converter": str(yb.get("value_converter", "org.apache.kafka.connect.json.JsonConverter")),
             "key.converter.schemas.enable": str(yb.get("key_converter_schemas_enable", "false")).lower(),
             "value.converter.schemas.enable": str(yb.get("value_converter_schemas_enable", "false")).lower(),
-        }
+        })
 
         # Optional TLS
         tls = yb.get("tls") or {}
@@ -741,7 +755,7 @@ class TableSyncOrchestrator:
             if tls.get("key_password"):
                 cfg_config["database.tls.key.password"] = str(tls["key_password"])
 
-        # 3.5) Preflight validation for better error messages (include 'name')
+        # 3.5) Preflight validation (includes 'name')
         ok, errors = self._validate_connector_config(connector_class, name, cfg_config)
         if not ok:
             self.logger.error("Connector config validation failed", connector=name, errors=errors[:20])
