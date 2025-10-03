@@ -22,12 +22,9 @@ class ConfigReader:
     def __init__(self, config_path):
         self.config_path = config_path
 
-    def read_config(self):
-        return self.load_config(self.config_path)
-
-    def load_config(self, config_path: str) -> Dict[str, Any]:
+    def load_config(self) -> Dict[str, Any]:
         try:
-            with open(config_path, 'r') as f:
+            with open(self.config_path, 'r') as f:
                 content = f.read()
 
             def env_replacer(match):
@@ -127,6 +124,6 @@ class ConfigReader:
             raise ValueError(f"Configuration validation errors: {', '.join(errors)}")
 
     def read_and_validate_config(self):
-        config = self.read_config()
+        config = self.load_config()
         self.validate_config(config)
         return config
