@@ -1,0 +1,38 @@
+    scan_interval_seconds: 30
+    comprehensive_database_scan: true
+    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
+    max_scan_threads: 10
+    
+    yugabytedb:
+      host: yb-tserver-service.yugabyte.svc.cluster.local
+      port: 5433
+      user: vaultadmin
+      password: test
+      database: kafka
+      master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
+    
+    bigquery:
+      project_id: k8s-kafka-774d
+      credentials_path: /vault/secrets/gcp-key.json
+      location: US
+    
+    kafka_connect:
+      url: http://kafka-connect.kafka.svc.internal.lan:8083
+      recreate_failed_connectors: true
+    
+    logging:
+      level: DEBUG
+      format: json
+      log_http_bodies_on_failure: true
+    
+    health_check:
+      port: 8080
+    
+    metrics:
+      port: 8000
+      enabled: true
+    
+    processing:
+      batch_size: 10000
+      max_retries: 3
+      retry_delay_seconds: 5
