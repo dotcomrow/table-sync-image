@@ -4,14 +4,15 @@
 """
 Production Table Sync Orchestrator for YugabyteDB → BigQuery.
 
-Key points:
+Highlights:
 - Filters out non-Postgres DSN keys before psycopg2.connect()
-- Adds robust connection options (timeouts, keepalives, application_name)
-- Guards BigQuery ops when client is None
-- Ensures Debezium YugabyteDB gRPC connector (single class: io.debezium.connector.yugabytedb.YugabyteDBConnector)
-- CDC stream id is taken from annotation or config; auto-list/create via yb-admin when master addresses are available
-- Validates connector config before create; includes required fields (topic.prefix) and sends 'name' in validation body
-- Logs failed HTTP requests to Kafka Connect with safely redacted payloads and truncated bodies
+- Robust connection options (timeouts, keepalives, application_name)
+- BigQuery guarded if client is None
+- Debezium YugabyteDB connector: auto-detects installed class
+  (prefers io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector)
+- CDC stream id via annotation/config; else auto list/create via yb-admin if master addresses available
+- Validates connector config before create; includes topic.prefix and sends 'name' in validation body
+- Logs failed HTTP requests to Kafka Connect with redacted payloads and truncated bodies
 """
 
 import os
@@ -585,7 +586,6 @@ class TableSyncOrchestrator:
             payload = r.json() if r.text else []
             classes = []
             for item in payload or []:
-                # Connect returns objects with fields like: {"class":"io.debezium.connector.postgresql.PostgresConnector", ...}
                 c = item.get("class")
                 if c:
                     classes.append(str(c))
@@ -594,15 +594,28 @@ class TableSyncOrchestrator:
             self._log_http_failure(method="GET", url=url, error=e, note="List connector plugins raised exception")
             return []
 
-    def _connector_plugin_available(self, wanted_class: str) -> bool:
+    def _select_yugabyte_connector_class(self) -> Optional[str]:
+        """Choose the installed Yugabyte connector class. Prefer gRPC flavor if present."""
         plugins = self._list_connector_plugins()
-        if not plugins:
-            self.logger.warning("Could not enumerate connector plugins; proceeding but validation may fail")
-            return True  # do not hard-fail if listing is blocked
-        if wanted_class in plugins:
-            return True
-        self.logger.error("Wanted connector plugin not installed", wanted_class=wanted_class, available_plugins=plugins)
-        return False
+        # Common class names across versions
+        grpc_cls = "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector"
+        generic_cls = "io.debezium.connector.yugabytedb.YugabyteDBConnector"
+
+        chosen = None
+        if grpc_cls in plugins:
+            chosen = grpc_cls
+        elif generic_cls in plugins:
+            chosen = generic_cls
+
+        if not chosen:
+            self.logger.error(
+                "No compatible YugabyteDB connector plugin found",
+                available_plugins=plugins
+            )
+            return None
+
+        self.logger.info("Using Yugabyte connector plugin", connector_class=chosen)
+        return chosen
 
     def _validate_connector_config(self, connector_class: str, name: str, config: Dict[str, str]) -> Tuple[bool, List[str]]:
         kc = (self.config.get('kafka_connect') or {}).get('url')
@@ -610,15 +623,12 @@ class TableSyncOrchestrator:
             return False, ["Kafka Connect URL not configured"]
         url = f"{kc}/connector-plugins/{connector_class}/config/validate"
         body_variants = [
-            # Most common: provide flat config with connector.class + name
             {"name": name, "connector.class": connector_class, **config},
-            # Some clusters expect nested {"config":{...}}
             {"config": {"name": name, "connector.class": connector_class, **config}},
         ]
         last_errs: List[str] = []
         for payload in body_variants:
             try:
-                # choose method PUT, fallback to POST if 404
                 resp = requests.put(url, json=payload, timeout=15)
                 if resp.status_code == 404:
                     resp = requests.post(url, json=payload, timeout=15)
@@ -633,10 +643,9 @@ class TableSyncOrchestrator:
                 cfgs = data.get("configs") or []
                 for item in cfgs:
                     v = item.get("value") or {}
-                    name_ = v.get("name")
-                    es = v.get("errors") or []
-                    for e in es:
-                        errs.append(f"{name_}: {e}" if name_ else str(e))
+                    nm = v.get("name")
+                    for e in (v.get("errors") or []):
+                        errs.append(f"{nm}: {e}" if nm else str(e))
 
                 if (error_count and int(error_count) > 0) or errs:
                     return False, errs or ["Unknown validation errors"]
@@ -655,11 +664,8 @@ class TableSyncOrchestrator:
             self.logger.error("Kafka Connect URL not configured")
             return False
 
-        # Correct class name for Yugabyte gRPC connector
-        connector_class = "io.debezium.connector.yugabytedb.YugabyteDBConnector"
-
-        # Verify the plugin exists in Connect
-        if not self._connector_plugin_available(connector_class):
+        connector_class = self._select_yugabyte_connector_class()
+        if not connector_class:
             return False
 
         db = table_info.database
@@ -685,9 +691,9 @@ class TableSyncOrchestrator:
             self.logger.error("No CDC stream id available; cannot create connector", table=table_info.full_name)
             return False
 
-        # 3) Build connector config
+        # 3) Build connector config (gRPC mode uses master addresses + stream id)
         yb = self.config.get('yugabytedb', {}) or {}
-        host = yb.get('host', '127.0.0.1')  # only used to default master port if env not set
+        host = yb.get('host', '127.0.0.1')  # only to default master port if env not set
         master_addrs = (
             yb.get('database.master.addresses')
             or yb.get('master_addresses')
@@ -705,10 +711,10 @@ class TableSyncOrchestrator:
             "database.master.addresses": master_addrs,
             "database.streamid": stream_id,
 
-            # Debezium topic prefix (DBZ 2.x)
+            # Debezium topic prefix
             "topic.prefix": topic_prefix,
 
-            # Table scope
+            # Limit to one table
             "database.dbname": db,
             "table.include.list": f"{sch}.{tbl}",
 
@@ -753,7 +759,6 @@ class TableSyncOrchestrator:
                 self.logger.info("CDC connector already existed (race)", connector=name)
                 return True
 
-            # Log full request/response for troubleshooting
             self._log_http_failure(method="POST", url=url, req_json=create_payload, resp=cr, note="Create connector failed")
             return False
         except Exception as e:
