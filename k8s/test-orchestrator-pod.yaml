@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orchestrator-test
+  namespace: kafka # Change to your target namespace
+spec:
+  restartPolicy: Never
+  containers:
+    - name: orchestrator-test
+      image: ghcr.io/dotcomrow/table-sync-image:ts-20251003-004140
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: KAFKA_CONNECT_URL
+          value: "http://kafka-connect.kafka.svc.cluster.local:8083"
+        - name: KAFKA_BOOTSTRAP
+          value: "kafka.kafka.svc.cluster.local:9092"
+        - name: KAFKA_NAMESPACE
+          value: "kafka"
+        - name: BIGQUERY_PROJECT_ID
+          value: "your-gcp-project-id"
+        - name: BIGQUERY_DATASET
+          value: "your_dataset"
+        - name: BIGQUERY_TABLE
+          value: "your_table"
+        - name: YB_HOST
+          value: "yugabyte.yugabyte.svc.cluster.local"
+        - name: YB_PORT
+          value: "5433"
+        - name: YB_USER
+          value: "test_user"
+        - name: YB_PASSWORD
+          value: "test_password"
+        - name: YB_DATABASE
+          value: "test_db"
+        - name: YB_CDC_STREAM_ID
+          value: "your-cdc-stream-id"
+      volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+  volumes:
+    - name: config-volume
+      configMap:
+        name: table-sync-config

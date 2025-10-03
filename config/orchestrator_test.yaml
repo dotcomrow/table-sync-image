@@ -1,0 +1,17 @@
+kafka_connect:
+  url: http://localhost:8083
+yugabytedb:
+  host: "localhost"
+  port: 5433
+  user: "test_user"
+  password: "test_password"
+  database: "test_db"
+  cdc_stream_id: "dummy-stream-id-for-test"
+kafka:
+  bootstrap_servers: "localhost:9092"
+  connector_name: "test-yugabyte-cdc-connector"
+  topic_name: "test-yugabyte-topic"
+bigquery:
+  project_id: "test-gcp-project"
+  dataset: "test_dataset"
+  table: "test_table"

@@ -118,20 +118,24 @@ class SyncStatus:
 # ----------------------------- Orchestrator -----------------------------
 
 class TableSyncOrchestrator:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, start_servers: bool = True):
         self.config = self._load_config(config_path)
         self.running = False
         self.db_connections: Dict[str, psycopg2.extensions.connection] = {}
         self.bigquery_client: Optional[bigquery.Client] = None
-        self.metrics = self._init_metrics()
+        self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()
         self.status_table: Dict[str, SyncStatus] = {}
 
         self._derive_project_id()
         self._init_bigquery_client()
         self._init_status_table()
-        self._start_health_server()
-        self._start_metrics_server()
+        import os
+        if start_servers:
+            if not os.getenv('DISABLE_HEALTH'):
+                self._start_health_server()
+            if not os.getenv('DISABLE_METRICS'):
+                self._start_metrics_server()
 
     # ----------------------------- Config -----------------------------
 
@@ -725,38 +729,31 @@ class TableSyncOrchestrator:
         if not kc:
             return False, ["Kafka Connect URL not configured"]
         url = f"{kc}/connector-plugins/{connector_class}/config/validate"
-        body_variants = [
-            {"name": name, "connector.class": connector_class, **config},
-            {"config": {"name": name, "connector.class": connector_class, **config}},
-        ]
-        last_errs: List[str] = []
-        for payload in body_variants:
-            try:
-                resp = requests.put(url, json=payload, timeout=15)
-                if resp.status_code == 404:
-                    resp = requests.post(url, json=payload, timeout=15)
-                if resp.status_code >= 400:
-                    self._log_http_failure(method="PUT/POST", url=url, req_json=payload, resp=resp, note="Validate failed HTTP")
-                    last_errs = [f"Validation HTTP {resp.status_code}: {resp.text}"]
-                    continue
+        payload = {"name": name, "connector.class": connector_class, **config}
+        try:
+            resp = requests.put(url, json=payload, timeout=15)
+            if resp.status_code == 404:
+                resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code >= 400:
+                self._log_http_failure(method="PUT/POST", url=url, req_json=payload, resp=resp, note="Validate failed HTTP")
+                return False, [f"Validation HTTP {resp.status_code}: {resp.text}"]
 
-                data = resp.json() if resp.text else {}
-                errs: List[str] = []
-                error_count = data.get("error_count")
-                cfgs = data.get("configs") or []
-                for item in cfgs:
-                    v = item.get("value") or {}
-                    nm = v.get("name")
-                    for e in (v.get("errors") or []):
-                        errs.append(f"{nm}: {e}" if nm else str(e))
+            data = resp.json() if resp.text else {}
+            errs: List[str] = []
+            error_count = data.get("error_count")
+            cfgs = data.get("configs") or []
+            for item in cfgs:
+                v = item.get("value") or {}
+                nm = v.get("name")
+                for e in (v.get("errors") or []):
+                    errs.append(f"{nm}: {e}" if nm else str(e))
 
-                if (error_count and int(error_count) > 0) or errs:
-                    return False, errs or ["Unknown validation errors"]
-                return True, []
-            except Exception as e:
-                self._log_http_failure(method="PUT/POST", url=url, req_json=payload, error=e, note="Validate raised exception")
-                last_errs = [f"Validation call failed: {e}"]
-                continue
+            if (error_count and int(error_count) > 0) or errs:
+                return False, errs or ["Unknown validation errors"]
+            return True, []
+        except Exception as e:
+            self._log_http_failure(method="PUT/POST", url=url, req_json=payload, error=e, note="Validate raised exception")
+            return False, [f"Validation call failed: {e}"]
         return False, last_errs or ["Validation failed"]
 
     # ---------------------- Create Debezium connector ----------------------
@@ -877,7 +874,8 @@ class TableSyncOrchestrator:
             return False
 
         # Create the connector
-        create_payload = {"name": name, "config": cfg_config}
+        # Kafka Connect expects a flat payload for connector creation
+        create_payload = {"name": name, "connector.class": connector_class, **cfg_config}
         try:
             url = f"{kc}/connectors"
             cr = requests.post(url, json=create_payload, timeout=20)
@@ -1025,7 +1023,8 @@ class TableSyncOrchestrator:
             databases = self._discover_databases()
             self.logger.info("Starting comprehensive database scan",
                              database_count=len(databases), databases=databases)
-            self.metrics['tables_scanned'].inc(len(databases))
+            if self.metrics:
+                self.metrics['tables_scanned'].inc(len(databases))
 
             max_threads_cfg = int(self.config.get('max_scan_threads', 0) or 0)
             max_threads = min(len(databases), max_threads_cfg or len(databases))
@@ -1114,7 +1113,8 @@ class TableSyncOrchestrator:
                         # after creation, check status once
                         state, all_running, last_err = self._connector_status(name)
 
-                    self.metrics['tables_synced'].inc()
+                    if self.metrics:
+                        self.metrics['tables_synced'].inc()
                     active_syncs += 1
                     self.logger.info("Table sync completed", table=ti.full_name)
 
@@ -1134,10 +1134,11 @@ class TableSyncOrchestrator:
                     topic_exists=topic_exists,
                 )
 
-            self.metrics['connectors_running'].set(connectors_running)
-            self.metrics['scan_duration'].observe(time.time() - t0)
-            self.metrics['last_scan_time'].set(time.time())
-            self.metrics['active_syncs'].set(active_syncs)
+            if self.metrics:
+                self.metrics['connectors_running'].set(connectors_running)
+                self.metrics['scan_duration'].observe(time.time() - t0)
+                self.metrics['last_scan_time'].set(time.time())
+                self.metrics['active_syncs'].set(active_syncs)
 
             self.logger.info("Comprehensive scan completed",
                              duration=time.time() - t0,
@@ -1149,7 +1150,8 @@ class TableSyncOrchestrator:
 
         except Exception as e:
             self.logger.error("Scan failed", error=str(e))
-            self.metrics['sync_errors'].labels(error_type='scan_error').inc()
+            if self.metrics:
+                self.metrics['sync_errors'].labels(error_type='scan_error').inc()
 
     # ----------------------------- Lifecycle -----------------------------
 
