@@ -12,7 +12,7 @@ jobs:
   build-production-cdc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@ff7abcd
+      - uses: actions/checkout@ff7abcd0c3c05ccf6adc123a8cd1fd4fb30fb493
 
       - name: Set timestamp tag
         id: set-tag
@@ -35,18 +35,18 @@ jobs:
           echo "registry=ghcr.io" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@5e57cd1
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
           username: ${{ steps.meta.outputs.owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@1583c0f
+        uses: docker/setup-buildx-action@1583c0f09d26c58c59d25b0eef29792b7ce99d9a
 
       # Build the production CDC processor
       - name: Build and push production image
-        uses: docker/build-push-action@9e436ba
+        uses: docker/build-push-action@9e436ba9f2d7bcd1d038c8e55d039d37896ddc5d
         with:
           context: .
           file: Dockerfile
