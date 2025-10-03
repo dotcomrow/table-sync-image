@@ -235,10 +235,10 @@ class TableSyncOrchestrator:
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
-        self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(ConfigKeys.HEALTH_CHECK_PORT.value, 8080))
+        self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get("port", 8080))
 
     def _start_metrics_server(self):
-        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get(ConfigKeys.METRICS_PORT.value, 8000))
+        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get("port", 8000))
         start_http_server(port)
         self.logger.info("Metrics server started", port=port)
 
