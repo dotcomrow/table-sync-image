@@ -91,7 +91,7 @@ class ConfigReader:
                 def get(self, key, default=None):
                     if not ConfigReader.is_enum_value(key):
                         raise TypeError("Config keys must be instances of Enum")
-                    return super().get(key.value, default)
+                    return super().get(key, default)
 
             cfg = ConfigDict(cfg)
 
@@ -183,7 +183,7 @@ class ConfigReader:
         self.validate_config(config)
         return config
 
-    def is_enum_value(self, property_string: str) -> bool:
+    def is_enum_value(property_string: str) -> bool:
         """
         Check if a property string is a value of one of the defined Enums in a multithreaded fashion.
 
