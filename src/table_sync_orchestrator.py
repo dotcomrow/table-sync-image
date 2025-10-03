@@ -184,9 +184,8 @@ class TableSyncOrchestrator:
 
     def _init_bigquery_client(self):
         try:
-            bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
-            credentials_path = bq.get(ConfigKeys.BIGQUERY_CREDENTIALS_PATH.value)
-            project_id = bq.get(ConfigKeys.BIGQUERY_PROJECT_ID.value)
+            credentials_path = self.config.get(ConfigKeys.BIGQUERY.value, {}).get("credentials_path", "/vault/secrets/gcp-key.json")
+            project_id = self.config.get(ConfigKeys.BIGQUERY.value, {}).get("project_id", None)
             if credentials_path and os.path.exists(credentials_path) and project_id:
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
                 self.bigquery_client = bigquery.Client(project=project_id)
@@ -327,12 +326,12 @@ class TableSyncOrchestrator:
         return kept
 
     def _discover_databases(self) -> List[str]:
-        target = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get(ConfigKeys.YUGABYTEDB_DATABASE.value, 'kafka')
+        target = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get("database", "kafka")
         try:
             conn = self._get_system_db_connection()
             try:
                 with conn.cursor() as cur:
-                    username = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get(ConfigKeys.YUGABYTEDB_USER.value, 'vaultadmin')
+                    username = (self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}).get("user", "vaultadmin")
                     cur.execute("SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = %s", (username,))
                     row = cur.fetchone()
                     if not row:
@@ -459,11 +458,52 @@ class TableSyncOrchestrator:
                 self.logger.error("Error during reconciliation", table=table_name, error=str(e))
 
     # ----------------------------- Orchestrator Loop -----------------------------
+    def _build_connector_config(self, table_info: TableInfo) -> Dict[str, Any]:
+        base_cfg = self.config.get(ConfigKeys.CONNECTOR_CONFIG.value, {}) or {}
+        cfg = dict(base_cfg)  # Start with base config
 
+        topic_prefix = (self.config.get(ConfigKeys.TOPIC_PREFIX.value, "ybcdc") or "").strip()
+        if not topic_prefix:
+            topic_prefix = "ybcdc"
+        server_name = f"{table_info.database}_{table_info.schema}_{table_info.table}"
+
+        cfg.update({
+            "name": f"ybcdc-{server_name}",
+            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+            "tasks.max": "1",
+            "database.server.name": server_name,
+            "table.include.list": f"{table_info.schema}.{table_info.table}",
+            "topic.prefix": topic_prefix,
+            "topic.creation.default.partitions": "1",
+            "topic.creation.default.replication.factor": "3",
+        })
+
+        yb_cfg = self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}
+        if 'host' in yb_cfg:
+            cfg['database.hostname'] = yb_cfg['host']
+        if 'port' in yb_cfg:
+            cfg['database.port'] = str(yb_cfg['port'])
+        if 'user' in yb_cfg:
+            cfg['database.user'] = yb_cfg['user']
+        if 'password' in yb_cfg:
+            cfg['database.password'] = yb_cfg['password']
+        if 'sslmode' in yb_cfg:
+            cfg['database.sslmode'] = yb_cfg['sslmode']
+
+        if table_info.annotation and table_info.annotation.cdc_stream_id:
+            cfg['cdc.stream.id'] = table_info.annotation.cdc_stream_id
+        elif self.cdc_manager.master_addresses:
+            stream_id = self.cdc_manager.ensure_cdc_stream(table_info)
+            if stream_id:
+                cfg['cdc.stream.id'] = stream_id
+
+        self.logger.debug("Built connector config", table=table_info.full_name, config=self._redact(cfg))
+        return cfg
+    
     def _derive_project_id(self):
         try:
             bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
-            project_id = bq.get(ConfigKeys.BIGQUERY_PROJECT_ID.value)
+            project_id = bq.get(ConfigKeys.BIGQUERY.value, {}).get("project_id", None)
             if project_id:
                 self.logger.info("Project ID derived from config", project_id=project_id)
                 return project_id
