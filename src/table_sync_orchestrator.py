@@ -586,7 +586,7 @@ class TableSyncOrchestrator:
                         
                         self.status_table[table_info.full_name] = SyncStatus(
                             table_info=table_info,
-                            last_scan=table_info.last_scan,
+                            last_scan=None,
                             annotation_enabled=bool(table_info.annotation),
                             bigquery_exists=self.bigquery_manager.table_exists(table_info),
                             connector_exists=connector_exists,
