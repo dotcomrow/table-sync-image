@@ -18,6 +18,7 @@ ARG YB_VERSION="2025.1.0.1"
 ARG YB_BUILD="3"
 ARG YB_ARCH="linux-x86_64"
 ARG YB_DOWNLOAD_URL="https://software.yugabyte.com"
+ARG YB_TARBALL_URL=""
 
 # --- Env ---
 ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
