@@ -44,7 +44,7 @@ class ConfigReader:
             self.parse_database_url(cfg)
             return cfg
         except Exception as e:
-            print(f"Failed to load config from {config_path}: {e}", file=sys.stderr)
+            print(f"Failed to load config from {self.config_path}: {e}", file=sys.stderr)
             sys.exit(1)
 
     def parse_database_url(self, config: Dict[str, Any]):
