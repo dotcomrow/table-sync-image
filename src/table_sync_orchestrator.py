@@ -231,7 +231,7 @@ class TableSyncOrchestrator:
             return jsonify({"tables": out, "ts": datetime.utcnow().isoformat()})
 
         def run_server():
-            port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(ConfigKeys.HEALTH_CHECK_PORT.value, 8080))
+            port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get("port", 8080))
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
