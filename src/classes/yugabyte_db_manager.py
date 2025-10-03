@@ -1,6 +1,6 @@
 import psycopg2
 from typing import Any, List
-from config_reader import ConfigKeys
+from classes.config_reader import ConfigKeys
 
 class YugabyteDBManager:
     def __init__(self, config):
