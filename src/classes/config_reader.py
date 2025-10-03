@@ -4,6 +4,7 @@ import re
 import sys
 from typing import Dict, Any
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 
 class ConfigKeys(Enum):
     SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
@@ -88,7 +89,7 @@ class ConfigReader:
             # Overwrite the get method to only accept Enums
             class ConfigDict(dict):
                 def get(self, key, default=None):
-                    if not isinstance(key, Enum):
+                    if not ConfigReader.is_enum_value(key):
                         raise TypeError("Config keys must be instances of Enum")
                     return super().get(key.value, default)
 
@@ -181,3 +182,26 @@ class ConfigReader:
         config = self.load_config()
         self.validate_config(config)
         return config
+
+    def is_enum_value(self, property_string: str) -> bool:
+        """
+        Check if a property string is a value of one of the defined Enums in a multithreaded fashion.
+
+        Args:
+            property_string (str): The property string to check.
+
+        Returns:
+            bool: True if the property string is a value of one of the Enums, False otherwise.
+        """
+        def check_enum(enum_class):
+            return property_string in [e.value for e in enum_class]
+
+        enum_classes = [
+            ConfigKeys, YugabyteDBKeys, BigQueryKeys, KafkaConnectKeys,
+            LoggingKeys, HealthCheckKeys, MetricsKeys, ProcessingKeys
+        ]
+
+        with ThreadPoolExecutor() as executor:
+            results = executor.map(check_enum, enum_classes)
+
+        return any(results)
