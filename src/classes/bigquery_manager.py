@@ -52,20 +52,40 @@ class BigQueryManager:
         # Check if dataset exists
         dataset_ref = self.client.dataset(dataset_id)
         try:
+            self.logger.debug("Checking if dataset exists", dataset_id=dataset_id)
             self.client.get_dataset(dataset_ref)
             self.logger.info("Dataset exists", dataset_id=dataset_id)
         except Exception as e:
             self.logger.warning("Dataset does not exist, creating it", dataset_id=dataset_id, error=str(e))
             dataset = bigquery.Dataset(dataset_ref)
             dataset.location = "US"  # Set location or make it configurable
+            self.logger.debug("Creating dataset", dataset_id=dataset_id, location=dataset.location)
             self.client.create_dataset(dataset)
             self.logger.info("Dataset created successfully", dataset_id=dataset_id)
 
-        table_ref = dataset_ref.table(table_id)
+        # Log schema conversion details
+        self.logger.debug("Starting schema conversion", input_schema=schema)
+        try:
+            converted_schema = [
+                bigquery.SchemaField(field.name, field.field_type, mode=field.mode)
+                for field in schema
+            ]
+            self.logger.info("Schema conversion successful", converted_schema=converted_schema)
+        except Exception as e:
+            self.logger.error("Schema conversion failed", error=str(e))
+            raise
 
-        table = bigquery.Table(table_ref, schema=schema)
-        self.client.create_table(table)
-        self.logger.info("Table created successfully", table=table_info)
+        # Log table creation details
+        table_ref = dataset_ref.table(table_id)
+        self.logger.debug("Preparing to create table", table_ref=str(table_ref), schema=converted_schema)
+        table = bigquery.Table(table_ref, schema=converted_schema)
+        try:
+            self.logger.debug("Sending request to create table", table_ref=str(table_ref))
+            response = self.client.create_table(table)
+            self.logger.info("Table created successfully", table=table_info, response=str(response))
+        except Exception as e:
+            self.logger.error("Failed to create table", table_ref=str(table_ref), error=str(e))
+            raise
 
     def delete_table(self, dataset_id, table_id):
         self._initialize_client()
@@ -358,3 +378,22 @@ class BigQueryManager:
             raise
 
         self.logger.info("Data sync via GCS completed successfully", table_info=table_info)
+
+    def convert_yugabyte_schema_to_bigquery(self, yugabyte_schema):
+        """
+        Convert YugabyteDB schema (list of SchemaField or dicts) to BigQuery schema format.
+        Assumes yugabyte_schema is a list of objects with 'name' and 'field_type' attributes,
+        or bigquery.SchemaField objects.
+        """
+        bq_schema = []
+        for col in yugabyte_schema:
+            # If already a SchemaField, just append
+            if isinstance(col, bigquery.SchemaField):
+                bq_schema.append(col)
+            else:
+                # Otherwise, assume dict/object with name/type
+                name = getattr(col, 'name', None) or col.get('name')
+                field_type = getattr(col, 'field_type', None) or col.get('field_type')
+                mode = getattr(col, 'mode', None) or col.get('mode', 'NULLABLE')
+                bq_schema.append(bigquery.SchemaField(name, field_type, mode=mode))
+        return bq_schema
