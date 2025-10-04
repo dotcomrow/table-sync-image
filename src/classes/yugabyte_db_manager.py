@@ -92,3 +92,16 @@ class YugabyteDBManager:
         """Reconcile a table's schema and data."""
         # Placeholder for reconciliation logic
         pass
+
+    def get_table_schema(self, schema_name: str, table_name: str):
+        """Fetch the schema of a table from YugabyteDB."""
+        query = f"""
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s;
+        """
+        try:
+            result = self.run_query(query, [schema_name, table_name])
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch schema for table {schema_name}.{table_name}: {e}")
