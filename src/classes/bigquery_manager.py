@@ -8,10 +8,14 @@ from classes.config_reader import ConfigKeys
 class BigQueryManager:
     def __init__(self, config):
         self.config = config
-        self.client = bigquery.Client()
+        self.client = None  # Initialize client as None
+
+    def _initialize_client(self):
+        if self.client is None:
+            self.client = bigquery.Client()
 
     def create_table(self, table_info):
-        # Implementation migrated from table_sync_orchestrator
+        self._initialize_client()
         dataset_id = table_info.bq_dataset
         table_id = table_info.bq_table
         if not dataset_id or not table_id:
@@ -28,12 +32,12 @@ class BigQueryManager:
         self.client.create_table(table)
 
     def delete_table(self, dataset_id, table_id):
-        # Implementation migrated from table_sync_orchestrator
+        self._initialize_client()
         table_ref = self.client.dataset(dataset_id).table(table_id)
         self.client.delete_table(table_ref)
 
     def copy_initial_data(self, table_info):
-        # Placeholder for initial data copy logic
+        self._initialize_client()
         query = f"""
         INSERT INTO `{table_info.bq_dataset}.{table_info.bq_table}`
         SELECT * FROM `{table_info.source_dataset}.{table_info.source_table}`
@@ -42,6 +46,7 @@ class BigQueryManager:
         job.result()  # Wait for the job to complete
 
     def check_table_exists(self, dataset_id, table_id):
+        self._initialize_client()
         try:
             self.client.get_table(self.client.dataset(dataset_id).table(table_id))
             return True
@@ -49,7 +54,7 @@ class BigQueryManager:
             return False
 
     def get_table_schema(self, table_info):
-        # Logic to fetch schema from YugabyteDB
+        self._initialize_client()
         master_addrs = (
             self.config.get(ConfigKeys.YUGABYTEDB_MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
@@ -65,7 +70,6 @@ class BigQueryManager:
                 [yb_admin_bin, "--master_addresses", master_addrs, "describe_table", namespace, table_info.table],
                 text=True, stderr=subprocess.STDOUT, timeout=20
             )
-            # Parse the output to extract schema details
             schema = []
             for line in out.splitlines():
                 match = re.match(r"Column:\s+(\w+)\s+Type:\s+(\w+)", line)
@@ -141,16 +145,7 @@ class BigQueryManager:
         return self._filter_excluded_databases(all_visible)
 
     def scan_table(self, yugabyte_manager, table_info) -> bool:
-        """
-        Detect if the table in BigQuery is different from the schema in YugabyteDB.
-
-        Args:
-            yugabyte_manager: An instance of YugabyteDBManager for database operations.
-            table_info: An object containing database, schema, and table information.
-
-        Returns:
-            bool: True if schemas differ, False otherwise.
-        """
+        self._initialize_client()
         yugabyte_schema = yugabyte_manager.get_table_schema(table_info)
 
         dataset_id = table_info.schema
@@ -163,13 +158,7 @@ class BigQueryManager:
         return bigquery_schema != yugabyte_schema_dict
 
     def update_table_schema(self, yugabyte_manager, table_info, schema_changes):
-        """
-        Update the schema in BigQuery to match the schema in YugabyteDB safely.
-
-        Args:
-            yugabyte_manager: An instance of YugabyteDBManager for database operations.
-            table_info: An object containing database, schema, and table information.
-        """
+        self._initialize_client()
         yugabyte_schema = yugabyte_manager.get_table_schema(table_info)
 
         dataset_id = table_info.schema
@@ -177,18 +166,11 @@ class BigQueryManager:
         table_ref = self.client.dataset(dataset_id).table(table_id)
         bigquery_table = self.client.get_table(table_ref)
 
-        # Update schema safely
         bigquery_table.schema = yugabyte_schema
         self.client.update_table(bigquery_table)
 
     def sync_table_data(self, yugabyte_manager, table_info):
-        """
-        Sync data from the YugabyteDB table to the BigQuery table.
-
-        Args:
-            yugabyte_manager: An instance of YugabyteDBManager for database operations.
-            table_info: An object containing database, schema, and table information.
-        """
+        self._initialize_client()
         dataset_id = table_info.schema
         table_id = table_info.table
 
