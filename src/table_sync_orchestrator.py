@@ -458,7 +458,7 @@ class TableSyncOrchestrator:
     def _derive_project_id(self):
         try:
             bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
-            project_id = bq.get(ConfigKeys.BIGQUERY.value, {}).get("project_id", None)
+            project_id = bq.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.PROJECT_ID.value, None)
             if project_id:
                 self.logger.info("Project ID derived from config", project_id=project_id)
                 return project_id
@@ -473,8 +473,8 @@ class TableSyncOrchestrator:
         except Exception as e:
             self.logger.error("Error deriving project ID", error=str(e))
 
-    def _table_sync_loop(self, table_info: SyncStatus):
-        name = table_info.table
+    def _table_sync_loop(self, sync_status: SyncStatus):
+        name = sync_status.table_info.table
         self.logger.info("Starting table sync loop", table=name)
         self.status_table[name].sync_active = True
         try:
@@ -483,18 +483,18 @@ class TableSyncOrchestrator:
                 self.logger.info("Beginning scan", table=name)
                 try:
                     # Scan table and detect schema changes
-                    changes = self.bigquery_manager.scan_table(self.yugabyte_manager, table_info)
+                    changes = self.bigquery_manager.scan_table(self.yugabyte_manager, sync_status.table_info)
                     self.logger.info("Scan complete", table=name, changes=changes)
 
                     if changes.get("schema_changed"):
                         self.logger.info("Schema change detected; updating BigQuery table", table=name)
-                        self.bigquery_manager.update_table_schema(self.yugabyte_manager, table_info, changes["schema"])
+                        self.bigquery_manager.update_table_schema(self.yugabyte_manager, sync_status.table_info, changes["schema"])
                         self.logger.info("BigQuery table schema updated", table=name)
                     else:
                         self.logger.info("No schema changes detected", table=name)
 
                     # Sync data to BigQuery
-                    self.bigquery_manager.sync_table_data(self.yugabyte_manager, table_info)
+                    self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
                     self.logger.info("Data sync complete", table=name)
                     self.status_table[name].last_scan = datetime.now()
                 except Exception as e:
@@ -529,7 +529,6 @@ class TableSyncOrchestrator:
                         # Check for existing connector by querying Kafka
                         connector_name = f"ybcdc-{table_info.database}_{table_info.schema}_{table_info.table}"
                         connector_exists = self.kafka_connector.check_connector_exists(connector_name)
-                        connector_exists = None
                         sync_active = False
 
                         if connector_exists:
