@@ -25,6 +25,7 @@ class ConfigKeys(Enum):
     ALLOW_YB_ADMIN = "allow_yb_admin"
     KAFKA_CONNECT_URL = "kafka_connect.url"
     DATABASE_MASTER_ADDRESSES = "database.master.addresses"
+    MOCK = "mock"
     
 class YugabyteDBKeys(Enum):
     MASTER_ADDRESSES = "master_addresses"
@@ -34,16 +35,19 @@ class YugabyteDBKeys(Enum):
     USER = "user"
     PASSWORD = "password"
     DATABASE = "database"
+    MOCK = "mock"
     
 class BigQueryKeys(Enum):
     PROJECT_ID = "project_id"
     DATASET = "dataset"
     CREDENTIALS_PATH = "credentials_path"
     DEFAULT_BACKUP_DATASET = "default_backup_dataset"
+    MOCK = "mock"
     
 class KafkaConnectKeys(Enum):
     URL = "url"
     RECREATE_FAILED_CONNECTORS = "recreate_failed_connectors"
+    MOCK = "mock"
     
 class LoggingKeys(Enum):
     LEVEL = "level"

@@ -10,6 +10,7 @@ from classes.config_reader import ConfigKeys,KafkaConnectKeys, LoggingKeys, Yuga
 class KafkaConnector:
     def __init__(self, config):
         self.config = config
+        self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
         self.logger = self._init_logger()
         
     def _init_logger(self) -> structlog.BoundLogger:

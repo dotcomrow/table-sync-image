@@ -2,12 +2,13 @@ import psycopg2
 from typing import Any, List
 
 import structlog
-from classes.config_reader import ConfigKeys, LoggingKeys
+from classes.config_reader import ConfigKeys, LoggingKeys, YugabyteDBKeys
 from classes.table_info import TableInfo  # <-- Add this import
 
 class YugabyteDBManager:
     def __init__(self, config):
         self.config = config
+        self.mock_enabled=self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False)
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
         self.host = db_cfg.get('host', 'localhost')
         self.port = db_cfg.get('port', 5433)
@@ -33,6 +34,11 @@ class YugabyteDBManager:
         return structlog.get_logger("yugabyte_db_manager")
 
     def connect(self):
+        if self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False):
+            self.logger.info("Mock connect called")
+            from unittest.mock import MagicMock
+            return MagicMock()
+        
         """Establish a connection to the YugabyteDB database."""
         self.logger.info("Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=self.database)
         try:

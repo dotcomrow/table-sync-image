@@ -5,18 +5,24 @@ import re
 from typing import List
 
 import structlog
-from classes.config_reader import ConfigKeys, LoggingKeys
+from classes.config_reader import ConfigKeys, LoggingKeys, BigQueryKeys
 
 class BigQueryManager:
     def __init__(self, config):
         self.config = config
         self.logger = self._init_logger()
         self.client = None  # Initialize client as None
+        self.mock_enabled=self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.MOCK.value, False)
 
     def _initialize_client(self):
         if self.client is None:
-            self.logger.info("Initializing BigQuery client")
-            self.client = bigquery.Client()
+            if self.mock_enabled:
+                self.logger.info("Initializing Mock BigQuery client")
+                from unittest.mock import MagicMock
+                self.client = MagicMock()
+            else:
+                self.logger.info("Initializing BigQuery client")
+                self.client = bigquery.Client()
             
     def _init_logger(self) -> structlog.BoundLogger:
         import logging

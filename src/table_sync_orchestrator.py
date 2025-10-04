@@ -50,6 +50,7 @@ from classes.cdc_manager import CDCManager
 from classes.table_info import TableInfo
 from classes.sync_status import SyncStatus
 from classes.yugabyte_db_manager import YugabyteDBManager
+from classes.table_info import TableAnnotation
 
 
 HAVE_KAFKA = True
@@ -70,6 +71,7 @@ class TableSyncOrchestrator:
         self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()
         self.status_table: Dict[str, SyncStatus] = {}
+        self.mock_enabled = self.config.get(ConfigKeys.MOCK.value, False)
 
         self._derive_project_id()
         self._init_bigquery_client()
