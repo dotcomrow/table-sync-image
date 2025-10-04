@@ -1,5 +1,6 @@
 import sys
 import os
+import traceback
 import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,8 @@ class TestTableSyncOrchestrator(unittest.TestCase):
         # Mock configuration and dependencies
         self.orchestrator = TableSyncOrchestrator(os.path.abspath(os.path.join(os.path.dirname(__file__), "../sample/test_config.yaml")))
         self.orchestrator.status_table = {}
+        self.mock_logger = MagicMock()
+        self.orchestrator.logger = self.mock_logger  # Assign the mock logger
 
         # Create mock SyncStatus objects
         self.sync_status_1 = SyncStatus(
@@ -56,6 +59,7 @@ class TestTableSyncOrchestrator(unittest.TestCase):
                 try:
                     future.result()
                 except Exception as e:
+                    traceback.print_exc()
                     self.orchestrator.logger.error("Error in table sync loop", table=ti.table_info.table, error=str(e))
 
         # Assertions

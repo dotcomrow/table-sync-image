@@ -474,7 +474,7 @@ class TableSyncOrchestrator:
             self.logger.error("Error deriving project ID", error=str(e))
 
     def _table_sync_loop(self, sync_status: SyncStatus):
-        name = sync_status.table_info.table
+        name = sync_status.table_info.full_name
         self.logger.info("Starting table sync loop", table=name)
         self.status_table[name].sync_active = True
         try:
