@@ -208,19 +208,140 @@ class BigQueryManager:
         self.client.update_table(bigquery_table)
 
     def sync_table_data(self, yugabyte_manager, table_info):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self._initialize_client()
         dataset_id = table_info.schema
         table_id = table_info.table
 
-        query = f"""
-        INSERT INTO `{dataset_id}.{table_id}`
-        SELECT * FROM EXTERNAL_QUERY(
-            "{self.config.get(ConfigKeys.YUGABYTEDB_EXTERNAL_CONNECTION.value)}",
-            "SELECT * FROM {table_info.schema}.{table_info.table}"
-        )
-        """
-        self.logger.info("Syncing table data from YugabyteDB to BigQuery", table_info=table_info)
-        self.logger.debug("Executing query", query=query)
-        job = self.client.query(query)
-        job.result()  # Wait for the job to complete
-        self.logger.info("Table data synced successfully", table_info=table_info)
+        self.logger.info("Starting multithreaded data sync from YugabyteDB to BigQuery", table_info=table_info)
+
+        # Step 1: Determine primary key ranges
+        primary_key = table_info.primary_key  # Assume primary_key is provided in table_info
+        yugabyte_query = f"SELECT MIN({primary_key}), MAX({primary_key}) FROM {table_info.schema}.{table_info.table}"
+
+        try:
+            with yugabyte_manager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(yugabyte_query)
+                    result = cursor.fetchone()
+
+            if not result or result[0] is None or result[1] is None:
+                self.logger.info("Table is empty, no data to sync", table_info=table_info)
+                return
+
+            min_pk, max_pk = result
+            self.logger.info("Primary key range determined", min_pk=min_pk, max_pk=max_pk)
+
+            # Step 2: Divide the range into chunks
+            num_threads = 4  # Adjust based on system capabilities
+            chunk_size = (max_pk - min_pk + 1) // num_threads
+            ranges = [
+                (start, min(start + chunk_size - 1, max_pk))
+                for start in range(min_pk, max_pk + 1, chunk_size)
+            ]
+
+            self.logger.info("Primary key ranges for threads", ranges=ranges)
+
+            # Step 3: Multithreaded data sync
+            def process_chunk(pk_range):
+                start_pk, end_pk = pk_range
+                self.logger.debug("Processing chunk", start_pk=start_pk, end_pk=end_pk)
+
+                query = f"""
+                SELECT * FROM {table_info.schema}.{table_info.table}
+                WHERE {primary_key} BETWEEN {start_pk} AND {end_pk}
+                """
+
+                with yugabyte_manager.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(query)
+                        rows = cursor.fetchall()
+
+                        if not rows:
+                            self.logger.info("No rows found for chunk", pk_range=pk_range)
+                            return
+
+                        rows_to_insert = [
+                            {field.name: value for field, value in zip(cursor.description, row)}
+                            for row in rows
+                        ]
+
+                        errors = self.client.insert_rows_json(
+                            self.client.dataset(dataset_id).table(table_id), rows_to_insert
+                        )
+
+                        if errors:
+                            self.logger.error("Failed to insert rows into BigQuery", errors=errors, pk_range=pk_range)
+                            raise RuntimeError(f"Failed to insert rows for range {pk_range}: {errors}")
+
+                        self.logger.info("Inserted chunk into BigQuery", chunk_size=len(rows), pk_range=pk_range)
+
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = {executor.submit(process_chunk, pk_range): pk_range for pk_range in ranges}
+
+                for future in as_completed(futures):
+                    pk_range = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        self.logger.error("Error processing chunk", pk_range=pk_range, error=str(e))
+                        raise
+
+            self.logger.info("Multithreaded data sync completed successfully", table_info=table_info)
+
+        except Exception as e:
+            self.logger.error("Error during multithreaded data sync", error=str(e))
+            raise
+
+    def sync_table_data_via_gcs(self, yugabyte_manager, table_info):
+        self._initialize_client()
+        dataset_id = table_info.schema
+        table_id = table_info.table
+
+        self.logger.info("Starting data sync via GCS from YugabyteDB to BigQuery", table_info=table_info)
+
+        # Step 1: Export data to a CSV file
+        export_file = f"/tmp/{table_info.table}_data.csv"
+        yugabyte_query = f"COPY (SELECT * FROM {table_info.schema}.{table_info.table}) TO STDOUT WITH CSV HEADER"
+
+        try:
+            with yugabyte_manager.get_connection() as conn:
+                with open(export_file, 'w') as f:
+                    with conn.cursor() as cursor:
+                        cursor.copy_expert(yugabyte_query, f)
+
+            self.logger.info("Data exported to file", file_path=export_file)
+
+            # Step 2: Upload file to Google Cloud Storage
+            bucket_name = self.config.get(ConfigKeys.GCS_BUCKET_NAME.value)
+            gcs_path = f"{table_info.schema}/{table_info.table}_data.csv"
+
+            from google.cloud import storage
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(gcs_path)
+            blob.upload_from_filename(export_file)
+
+            self.logger.info("File uploaded to GCS", gcs_path=gcs_path)
+
+            # Step 3: Load data into BigQuery
+            job_config = bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.CSV,
+                skip_leading_rows=1,
+                autodetect=True,
+            )
+
+            uri = f"gs://{bucket_name}/{gcs_path}"
+            load_job = self.client.load_table_from_uri(
+                uri, self.client.dataset(dataset_id).table(table_id), job_config=job_config
+            )
+
+            load_job.result()  # Wait for the job to complete
+            self.logger.info("Data loaded into BigQuery from GCS", table_info=table_info)
+
+        except Exception as e:
+            self.logger.error("Error during GCS-based data sync", error=str(e))
+            raise
+
+        self.logger.info("Data sync via GCS completed successfully", table_info=table_info)

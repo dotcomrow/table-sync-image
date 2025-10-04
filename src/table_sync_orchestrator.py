@@ -482,20 +482,24 @@ class TableSyncOrchestrator:
                 start = time.time()
                 self.logger.info("Beginning scan", table=name)
                 try:
+                    if not sync_status.bigquery_exists:
+                        self.bigquery_manager.create_table(self.yugabyte_manager, sync_status.table_info)
+                        self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
+                    
                     # Scan table and detect schema changes
-                    changes = self.bigquery_manager.scan_table(self.yugabyte_manager, sync_status.table_info)
-                    self.logger.info("Scan complete", table=name, changes=changes)
+                    # changes = self.bigquery_manager.scan_table(self.yugabyte_manager, sync_status.table_info)
+                    # self.logger.info("Scan complete", table=name, changes=changes)
 
-                    if changes.get("schema_changed"):
-                        self.logger.info("Schema change detected; updating BigQuery table", table=name)
-                        self.bigquery_manager.update_table_schema(self.yugabyte_manager, sync_status.table_info, changes["schema"])
-                        self.logger.info("BigQuery table schema updated", table=name)
-                    else:
-                        self.logger.info("No schema changes detected", table=name)
+                    # if changes.get("schema_changed"):
+                    #     self.logger.info("Schema change detected; updating BigQuery table", table=name)
+                    #     self.bigquery_manager.update_table_schema(self.yugabyte_manager, sync_status.table_info, changes["schema"])
+                    #     self.logger.info("BigQuery table schema updated", table=name)
+                    # else:
+                    #     self.logger.info("No schema changes detected", table=name)
 
-                    # Sync data to BigQuery
-                    self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
-                    self.logger.info("Data sync complete", table=name)
+                    # # Sync data to BigQuery
+                    # self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
+                    # self.logger.info("Data sync complete", table=name)
                     self.status_table[name].last_scan = datetime.now()
                 except Exception as e:
                     self.logger.error("Error during table sync", table=name, error=str(e))
