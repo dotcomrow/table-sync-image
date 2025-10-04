@@ -45,7 +45,6 @@ import requests
 
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
-from classes.annotation_processor import TableAnnotation, AnnotationProcessor
 from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, BigQueryKeys, HealthCheckKeys, MetricsKeys, KafkaConnectKeys
 from classes.cdc_manager import CDCManager
 from classes.table_info import TableInfo
@@ -64,7 +63,6 @@ class TableSyncOrchestrator:
         self.yugabyte_manager = YugabyteDBManager(self.config)
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
-        self.annotation_processor = AnnotationProcessor()
         self.cdc_manager = CDCManager(self.config)
         self.running = False
         self.db_connections: Dict[str, psycopg2.extensions.connection] = {}
