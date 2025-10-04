@@ -7,6 +7,7 @@ from classes.table_info import TableInfo  # <-- Add this import
 
 class YugabyteDBManager:
     def __init__(self, config):
+        self.config = config
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
         self.host = db_cfg.get('host', 'localhost')
         self.port = db_cfg.get('port', 5433)
