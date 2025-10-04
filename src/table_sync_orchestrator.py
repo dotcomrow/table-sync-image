@@ -528,21 +528,20 @@ class TableSyncOrchestrator:
 
                 for table_info in tables:
                     # Initialize status entry
-                    if table_info.full_name not in self.status_table:
-                        
-                        # Check for existing connector by querying Kafka
-                        connector_name = f"ybcdc-{table_info.database}_{table_info.schema}_{table_info.table}"
-                        connector_exists = self.kafka_connector.check_connector_exists(connector_name)
-                        sync_active = False
-
-                        if connector_exists:
-                            self.logger.info("Connector already exists for table", table=table_info.full_name)
-                            connector_exists = True
-                            sync_active = True
-                        else:
-                            connector_exists = False
-                            
+                    if table_info.full_name not in self.status_table:                         
                         if table_info.annotation is not None and table_info.annotation.enabled:
+                            # Check for existing connector by querying Kafka
+                            connector_name = f"ybcdc-{table_info.database}_{table_info.schema}_{table_info.table}"
+                            connector_exists = self.kafka_connector.check_connector_exists(connector_name)
+                            sync_active = False
+
+                            if connector_exists:
+                                self.logger.info("Connector already exists for table", table=table_info.full_name)
+                                connector_exists = True
+                                sync_active = True
+                            else:
+                                connector_exists = False
+                            
                             self.status_table[table_info.full_name] = SyncStatus(
                                 table_info=table_info,
                                 last_scan=None,
