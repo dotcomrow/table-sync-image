@@ -537,15 +537,16 @@ class TableSyncOrchestrator:
                             sync_active = True
                         else:
                             connector_exists = False
-                        
-                        self.status_table[table_info.full_name] = SyncStatus(
-                            table_info=table_info,
-                            last_scan=None,
-                            annotation_enabled=bool(table_info.annotation),
-                            bigquery_exists=self.bigquery_manager.check_table_exists(table_info.schema, table_info.table),
-                            connector_exists=connector_exists,
-                            sync_active=sync_active
-                        )
+                            
+                        if table_info.annotation.enabled:
+                            self.status_table[table_info.full_name] = SyncStatus(
+                                table_info=table_info,
+                                last_scan=None,
+                                annotation_enabled=bool(table_info.annotation),
+                                bigquery_exists=self.bigquery_manager.check_table_exists(table_info.schema, table_info.table),
+                                connector_exists=connector_exists,
+                                sync_active=sync_active
+                            )
 
             self.logger.info("Starting table sync loops")
             with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
