@@ -1,6 +1,7 @@
 import psycopg2
 from typing import Any, List
 from classes.config_reader import ConfigKeys
+from classes.table_info import TableInfo  # <-- Add this import
 
 class YugabyteDBManager:
     def __init__(self, config):
@@ -93,8 +94,10 @@ class YugabyteDBManager:
         # Placeholder for reconciliation logic
         pass
 
-    def get_table_schema(self, schema_name: str, table_name: str):
+    def get_table_schema(self, table_info: TableInfo):
         """Fetch the schema of a table from YugabyteDB."""
+        schema_name = table_info.schema  # <-- Extract schema_name
+        table_name = table_info.table    # <-- Extract table_name
         query = f"""
         SELECT column_name, data_type
         FROM information_schema.columns
