@@ -545,7 +545,7 @@ class TableSyncOrchestrator:
                                 table_info=table_info,
                                 last_scan=None,
                                 annotation_enabled=bool(table_info.annotation),
-                                bigquery_exists=self.bigquery_manager.check_table_exists(table_info.schema, table_info.table),
+                                bigquery_exists=self.bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table),
                                 connector_exists=connector_exists,
                                 sync_active=sync_active
                             )
