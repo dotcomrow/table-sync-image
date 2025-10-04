@@ -49,7 +49,18 @@ class BigQueryManager:
             self.logger.error("Invalid dataset or table ID", dataset_id=dataset_id, table_id=table_id)
             raise ValueError("Invalid dataset or table ID")
 
+        # Check if dataset exists
         dataset_ref = self.client.dataset(dataset_id)
+        try:
+            self.client.get_dataset(dataset_ref)
+            self.logger.info("Dataset exists", dataset_id=dataset_id)
+        except Exception as e:
+            self.logger.warning("Dataset does not exist, creating it", dataset_id=dataset_id, error=str(e))
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = "US"  # Set location or make it configurable
+            self.client.create_dataset(dataset)
+            self.logger.info("Dataset created successfully", dataset_id=dataset_id)
+
         table_ref = dataset_ref.table(table_id)
 
         table = bigquery.Table(table_ref, schema=schema)
