@@ -40,7 +40,7 @@ class BigQueryManager:
         )
         return structlog.get_logger("bigquery_manager")
 
-    def create_table(self, table_info):
+    def create_table(self, table_info, schema):
         self._initialize_client()
         self.logger.info("Creating table in BigQuery", table_info=table_info)
         dataset_id = table_info.bq_dataset
@@ -51,10 +51,6 @@ class BigQueryManager:
 
         dataset_ref = self.client.dataset(dataset_id)
         table_ref = dataset_ref.table(table_id)
-
-        schema = [
-            bigquery.SchemaField("column_name", "STRING", mode="NULLABLE"),  # Replace with actual schema logic
-        ]
 
         table = bigquery.Table(table_ref, schema=schema)
         self.client.create_table(table)

@@ -483,6 +483,7 @@ class TableSyncOrchestrator:
                 self.logger.info("Beginning scan", table=name)
                 try:
                     if not sync_status.bigquery_exists:
+                        self.yugabyte_manager.get_table_schema(sync_status.table_info)
                         self.bigquery_manager.create_table(sync_status.table_info)
                         self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
                     
