@@ -3,22 +3,44 @@ import os
 import subprocess
 import re
 from typing import List
-from classes.config_reader import ConfigKeys
+
+import structlog
+from classes.config_reader import ConfigKeys, LoggingKeys
 
 class BigQueryManager:
     def __init__(self, config):
         self.config = config
+        self.logger = self._init_logger()
         self.client = None  # Initialize client as None
 
     def _initialize_client(self):
         if self.client is None:
+            self.logger.info("Initializing BigQuery client")
             self.client = bigquery.Client()
+            
+    def _init_logger(self) -> structlog.BoundLogger:
+        import logging
+        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.value, {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
+        numeric = getattr(logging, lvl, logging.INFO)
+        structlog.configure(
+            processors=[
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.add_log_level,
+                structlog.processors.JSONRenderer()
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(numeric),
+            logger_factory=structlog.PrintLoggerFactory(),
+            cache_logger_on_first_use=True,
+        )
+        return structlog.get_logger("bigquery_manager")
 
     def create_table(self, table_info):
         self._initialize_client()
+        self.logger.info("Creating table in BigQuery", table_info=table_info)
         dataset_id = table_info.bq_dataset
         table_id = table_info.bq_table
         if not dataset_id or not table_id:
+            self.logger.error("Invalid dataset or table ID", dataset_id=dataset_id, table_id=table_id)
             raise ValueError("Invalid dataset or table ID")
 
         dataset_ref = self.client.dataset(dataset_id)
@@ -30,53 +52,68 @@ class BigQueryManager:
 
         table = bigquery.Table(table_ref, schema=schema)
         self.client.create_table(table)
+        self.logger.info("Table created successfully", table=table_info)
 
     def delete_table(self, dataset_id, table_id):
         self._initialize_client()
+        self.logger.info("Deleting table in BigQuery", dataset_id=dataset_id, table_id=table_id)
         table_ref = self.client.dataset(dataset_id).table(table_id)
         self.client.delete_table(table_ref)
+        self.logger.info("Table deleted successfully", dataset_id=dataset_id, table_id=table_id)
 
     def copy_initial_data(self, table_info):
         self._initialize_client()
+        self.logger.info("Copying initial data to BigQuery table", table_info=table_info)
         query = f"""
         INSERT INTO `{table_info.bq_dataset}.{table_info.bq_table}`
         SELECT * FROM `{table_info.source_dataset}.{table_info.source_table}`
         """
+        self.logger.debug("Executing query", query=query)
         job = self.client.query(query)
         job.result()  # Wait for the job to complete
+        self.logger.info("Initial data copied successfully", table_info=table_info)
 
     def check_table_exists(self, dataset_id, table_id):
         self._initialize_client()
+        self.logger.info("Checking if table exists in BigQuery", dataset_id=dataset_id, table_id=table_id)
         try:
             self.client.get_table(self.client.dataset(dataset_id).table(table_id))
+            self.logger.info("Table exists", dataset_id=dataset_id, table_id=table_id)
             return True
-        except Exception:
+        except Exception as e:
+            self.logger.warning("Table does not exist", dataset_id=dataset_id, table_id=table_id, error=str(e))
             return False
 
     def get_table_schema(self, table_info):
         self._initialize_client()
+        self.logger.info("Fetching table schema from YugabyteDB", table_info=table_info)
         master_addrs = (
             self.config.get(ConfigKeys.YUGABYTEDB_MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
         )
         if not master_addrs:
+            self.logger.error("Master addresses not configured")
             raise ValueError("Master addresses not configured")
 
         yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB_YB_ADMIN_PATH.value, "yb-admin")
         namespace = f"ysql.{table_info.database}"
 
         try:
+            self.logger.debug("Running yb-admin command", command=[yb_admin_bin, "--master_addresses", master_addrs, "describe_table", namespace, table_info.table])
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "describe_table", namespace, table_info.table],
                 text=True, stderr=subprocess.STDOUT, timeout=20
             )
+            self.logger.debug("yb-admin output", output=out)
             schema = []
             for line in out.splitlines():
                 match = re.match(r"Column:\s+(\w+)\s+Type:\s+(\w+)", line)
                 if match:
                     schema.append(bigquery.SchemaField(match.group(1), match.group(2).upper(), mode="NULLABLE"))
+            self.logger.info("Schema fetched successfully", schema=schema)
             return schema
         except subprocess.CalledProcessError as e:
+            self.logger.error("Failed to fetch table schema", error=str(e))
             raise RuntimeError(f"Failed to fetch table schema: {e}")
 
     def create_database_if_needed(self, target_database: str, username: str) -> List[str]:
@@ -146,6 +183,7 @@ class BigQueryManager:
 
     def scan_table(self, yugabyte_manager, table_info) -> bool:
         self._initialize_client()
+        self.logger.info("Scan table starting...", table=table_info.table)
         yugabyte_schema = yugabyte_manager.get_table_schema(table_info)
 
         dataset_id = table_info.schema
@@ -181,5 +219,8 @@ class BigQueryManager:
             "SELECT * FROM {table_info.schema}.{table_info.table}"
         )
         """
+        self.logger.info("Syncing table data from YugabyteDB to BigQuery", table_info=table_info)
+        self.logger.debug("Executing query", query=query)
         job = self.client.query(query)
         job.result()  # Wait for the job to complete
+        self.logger.info("Table data synced successfully", table_info=table_info)
