@@ -335,7 +335,7 @@ class TableSyncOrchestrator:
                     ORDER BY t.table_schema, t.table_name
                 """)
                 for row in cur.fetchall():
-                    ann = TableAnnotation.from_comment(row['table_comment']) if row['table_comment'] else None
+                    ann = TableAnnotation.from_comment(self.config, row['table_comment']) if row['table_comment'] else None
                     out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
