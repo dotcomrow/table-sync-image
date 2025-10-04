@@ -538,7 +538,7 @@ class TableSyncOrchestrator:
                         else:
                             connector_exists = False
                             
-                        if table_info.annotation.enabled:
+                        if table_info.annotation is not None and table_info.annotation.enabled:
                             self.status_table[table_info.full_name] = SyncStatus(
                                 table_info=table_info,
                                 last_scan=None,
