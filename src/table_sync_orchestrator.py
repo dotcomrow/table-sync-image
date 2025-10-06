@@ -482,28 +482,31 @@ class TableSyncOrchestrator:
                 start = time.time()
                 self.logger.info("Beginning scan", table=name)
                 try:
-                    if not sync_status.bigquery_exists:
-                        self.logger.info("BigQuery table does not exist; creating", table=name)
-                        yb_schema = self.yugabyte_manager.get_table_schema(sync_status.table_info)
-                        self.logger.info("Creating BigQuery table", table=name, schema=yb_schema)
-                        self.bigquery_manager.create_table(sync_status.table_info, yb_schema)
-                        self.logger.info("BigQuery table created, populating with data from yugabyte", table=name)
-                        self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
+                    # this loop is for tables that have annotation enabled
+                    # In here we need to determine is we need to create connectors
                     
-                    # Scan table and detect schema changes
-                    # changes = self.bigquery_manager.scan_table(self.yugabyte_manager, sync_status.table_info)
-                    # self.logger.info("Scan complete", table=name, changes=changes)
+                    # First, check if connectors already exist. 
+                    # If they do then let this sleep until next run
+                    # If not, then setup the connectors
+                    
+                    source_connector_name = f"yb-source-{sync_status.table_info.database}-{sync_status.table_info.table}"
+                    sink_connector_name = f"bq-sink-{sync_status.table_info.database}-{sync_status.table_info.table}"
 
-                    # if changes.get("schema_changed"):
-                    #     self.logger.info("Schema change detected; updating BigQuery table", table=name)
-                    #     self.bigquery_manager.update_table_schema(self.yugabyte_manager, sync_status.table_info, changes["schema"])
-                    #     self.logger.info("BigQuery table schema updated", table=name)
-                    # else:
-                    #     self.logger.info("No schema changes detected", table=name)
+                    if not self.kafka_connector.check_connector_exists(source_connector_name):
+                        self.kafka_connector.create_source_connector(
+                            sync_status.table_info.database,
+                            sync_status.table_info.schema,
+                            sync_status.table_info.table,
+                            sync_status.cdc_stream_id,
+                            sync_status.pg_host,
+                            sync_status.pg_port,
+                            sync_status.pg_user,
+                            sync_status.pg_password,
+                            sync_status.connect_url
+                        )
+                    if not self.kafka_connector.check_connector_exists(sink_connector_name):
+                        self.kafka_connector.create_sink_connector(sync_status.table_info)
 
-                    # # Sync data to BigQuery
-                    # self.bigquery_manager.sync_table_data(self.yugabyte_manager, sync_status.table_info)
-                    # self.logger.info("Data sync complete", table=name)
                     self.status_table[name].last_scan = datetime.now()
                 except Exception as e:
                     self.logger.error("Error during table sync", table=name, error=str(e))
@@ -565,6 +568,9 @@ class TableSyncOrchestrator:
                         future.result()
                     except Exception as e:
                         self.logger.error("Error in table sync loop", table=ti.table_info.table, error=str(e))
+                        
+            # Need to start a loop to check existing connectors to see if any need to be removed
+            
         except Exception as e:
             self.logger.error("Unexpected error in orchestrator", error=str(e))
         finally:

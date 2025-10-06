@@ -48,6 +48,7 @@ class KafkaConnectKeys(Enum):
     URL = "url"
     RECREATE_FAILED_CONNECTORS = "recreate_failed_connectors"
     MOCK = "mock"
+    BOOTSTRAP = "bootstrap"
     
 class LoggingKeys(Enum):
     LEVEL = "level"

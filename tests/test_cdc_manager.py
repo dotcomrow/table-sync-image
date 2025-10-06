@@ -1,5 +1,5 @@
 import unittest
-from src.classes.cdc_manager import CDCManager
+from classes.cdc_manager import CDCManager
 
 class TestCDCManager(unittest.TestCase):
     def setUp(self):

@@ -85,6 +85,9 @@ RUN chown cdc_user:cdc_user /app
 COPY src/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install debugpy for debugging
+RUN pip install --no-cache-dir debugpy
+
 # --- Application code ---
 COPY src/ ./src/
 
@@ -98,8 +101,22 @@ USER cdc_user
 # --- Expose health port ---
 EXPOSE 8080
 
-# Ensure PYTHONPATH is set before the entrypoint
-ENV PYTHONPATH="/app/src"
-
 # --- Entrypoint ---
-ENTRYPOINT ["python", "src/table_sync_orchestrator.py"]
+ARG MODE
+ENV MODE=$MODE
+
+# --- Copy test config ---
+COPY /sample/test_config.yaml /app/sample/test_config.yaml
+
+# Add a script to handle dynamic command selection
+COPY entrypoint.sh /entrypoint.sh
+CMD ["/entrypoint.sh"]
+
+# Set the working directory to /app
+WORKDIR /app
+
+# Ensure the PYTHONPATH includes the root directory and the tests directory
+ENV PYTHONPATH=/app:/app/tests
+
+# Copy the tests directory explicitly
+COPY tests/ ./tests/

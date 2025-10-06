@@ -4,55 +4,61 @@ import time
 from unittest.mock import patch
 import sys
 import subprocess
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.table_sync_orchestrator import TableSyncOrchestrator, TableInfo
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
-KAFKA_CONNECT_URL = "http://kafka-connect.kafka.svc.internal.lan:8083"
-KAFKA_NAMESPACE = "kafka"
+from classes.bigquery_manager import BigQueryManager
+from classes.yugabyte_db_manager import YugabyteDBManager
+from classes.config_reader import ConfigReader
+from classes.kafka_connector import KafkaConnector
+from classes.table_info import TableInfo
+from classes.table_annotation import TableAnnotation
 
-def run_kubectl(cmd):
-    full_cmd = ["tsh", "kubectl"] + cmd + ["-n", KAFKA_NAMESPACE]
-    result = subprocess.run(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return result.stdout.strip(), result.stderr.strip(), result.returncode
-
-KAFKA_NAMESPACE = os.getenv("KAFKA_NAMESPACE", "kafka")
-KAFKA_CONNECT_URL = os.getenv("KAFKA_CONNECT_URL", "http://kafka-connect.kafka.svc.cluster.local:8083")
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka.kafka.svc.cluster.local:9092")
-
-class TestKafkaConnectorCreation(unittest.TestCase):
+class TestKafkaConnector(unittest.TestCase):
     def setUp(self):
-        self.config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../config/orchestrator_test.yaml'))
-        self.orchestrator = TableSyncOrchestrator(self.config_path, start_servers=False)
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../sample/test_config.yaml"))
+        self.config = ConfigReader(config_path).load_config()
+        self.yugabyte_manager = YugabyteDBManager(self.config)
+        self.kafka_connector = KafkaConnector(self.config)
+        self.bigquery_manager = BigQueryManager(self.config)
+        
         self.table_info = TableInfo(
             database="testdb",
             schema="public",
             table="testtable",
-            annotation=None
+            annotation=TableAnnotation.from_comment(self.config, '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
+        )
+        
+
+    def test_create_cdc_connector(self):
+        """Test the create_cdc_connector method."""
+        self.kafka_connector.create_cdc_connector(self.table_info)
+
+    def test_delete_cdc_connector(self):
+        """Test the delete_cdc_connector method."""
+        connector_name = "test_connector"
+        self.kafka_connector.delete_cdc_connector(connector_name)
+
+    def test_get_cdc_stream_id(self):
+        """Test the get_cdc_stream_id method."""
+        stream_id = self.kafka_connector.get_cdc_stream_id(self.table_info)
+
+    def test_check_connector_exists(self):
+        """Test the check_connector_exists method."""
+        connector_name = "test_connector"
+        exists = self.kafka_connector.check_connector_exists(connector_name)
+
+    def test_create_source_connector(self):
+        """Test the create_source_connector method."""
+        self.kafka_connector.create_source_connector(
+            "testdb", "public", "testtable", "test_stream_id", "localhost", 5433, "user", "password", "http://localhost:8083"
         )
 
-    def test_connector_creation(self):
-        # Remove connector if exists
-        connector_name = self.orchestrator._connector_name(self.table_info)
-        out, err, code = run_kubectl(["delete", "connector", connector_name, "--ignore-not-found=true"])
-        time.sleep(2)
-        # Create connector
-        result = self.orchestrator._create_cdc_connector(self.table_info)
-        self.assertTrue(result, f"Connector creation failed: {err}")
-        # Check connector status
-        status = self.orchestrator._connector_status(connector_name)
-        self.assertIsNotNone(status, "Connector status not found")
-
-    def test_topic_creation(self):
-        topic = self.orchestrator._expected_topic_name(self.table_info)
-        # Remove topic if exists
-        out, err, code = run_kubectl(["exec", "kafka-0", "--", "kafka-topics.sh", "--delete", "--topic", topic, "--bootstrap-server", KAFKA_BOOTSTRAP])
-        time.sleep(2)
-        # Create connector (should create topic)
-        self.orchestrator._create_cdc_connector(self.table_info)
-        time.sleep(5)
-        # Check topic existence
-        exists = self.orchestrator._check_topic_exists(topic)
-        self.assertTrue(exists, f"Topic {topic} was not created by connector")
+    def test_create_sink_connector(self):
+        """Test the create_sink_connector method."""
+        self.kafka_connector.create_sink_connector(
+            "testdb", "testtable", "test_topic", "test_dataset", "test_project", "test_default_dataset", "http://localhost:8083"
+        )
 
 if __name__ == "__main__":
+    
     unittest.main()

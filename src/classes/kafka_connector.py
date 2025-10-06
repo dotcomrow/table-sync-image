@@ -185,3 +185,88 @@ class KafkaConnector:
         except Exception as e:
             self.logger.error("Exception while fetching Kafka connector status", error=str(e))
             return None
+
+    def create_source_connector(self, db_name, schema_name, table_name, stream_id, pg_host, pg_port, pg_user, pg_password, connect_url):
+        """Create a source connector for a specific table in YugabyteDB."""
+        self.logger.info("Creating source connector", db_name=db_name, schema_name=schema_name, table_name=table_name)
+        source_config = {
+            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+            "tasks.max": "1",
+            "database.hostname": pg_host,
+            "database.port": pg_port,
+            "database.user": pg_user,
+            "database.password": pg_password,
+            "database.dbname": db_name,
+            "database.server.name": f"yb_{db_name}_{schema_name}_{table_name}",
+            "database.stream.id": stream_id,
+            "table.include.list": f"{schema_name}.{table_name}",
+            "snapshot.mode": "initial",
+            "incremental.snapshot.enabled": "true",
+            "signal.data.collection": "public.debezium_signal",
+            "transforms": "unwrap",
+            "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
+            "transforms.unwrap.delete.handling.mode": "none",
+            "topic.creation.default.replication.factor": "1",
+            "topic.creation.default.partitions": "1",
+            "topic.creation.default.cleanup.policy": "delete"
+        }
+
+        response = self._send_connector_request(connect_url, f"yb-source-{db_name}-{schema_name}-{table_name}", source_config)
+        self.logger.info("Source connector created", response=response)
+
+    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_project, bq_default_dataset, connect_url):
+        """Create a sink connector for a specific table in BigQuery."""
+        self.logger.info("Creating sink connector", db_name=db_name, table_name=table_name)
+        sink_config = {
+            "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+            "tasks.max": "1",
+            "topics": topic,
+            "topic2TableMap": f"{topic}:{table_name}",
+            "datasets": f"{topic}:{dataset}",
+            "project": bq_project,
+            "defaultDataset": bq_default_dataset,
+            "sanitizeTopics": "false",
+            "autoCreateTables": "true",
+            "autoUpdateSchemas": "false",
+            "allowNewBigQueryFields": "false",
+            "upsertEnabled": "true",
+            "deleteEnabled": "true",
+            "primaryKeyMode": "record_value",
+            "primaryKeyFields": "id",
+            "errors.tolerance": "all",
+            "errors.log.enable": "true",
+            "errors.deadletterqueue.topic.name": "bq-dlq",
+            "errors.deadletterqueue.context.headers.enable": "true",
+            "errors.deadletterqueue.topic.replication.factor": "1",
+            "errors.deadletterqueue.topic.partitions": "1",
+            "enableRetries": "true",
+            "bigQueryRetry": "6",
+            "bigQueryRetryWait": "2000",
+            "keySource": "FILE",
+            "keyfile": "/vault/secrets/gcp-key.json",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "true",
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "true",
+            "consumer.override.auto.offset.reset": "earliest"
+        }
+
+        response = self._send_connector_request(connect_url, f"bq-sink-{db_name}-{table_name}", sink_config)
+        self.logger.info("Sink connector created", response=response)
+
+    def _send_connector_request(self, connect_url, connector_name, config):
+        """Helper method to send a request to create or update a connector."""
+        import requests
+        import json
+
+        url = f"{connect_url}/connectors/{connector_name}/config"
+        headers = {"Content-Type": "application/json"}
+        self.logger.debug("Sending connector request", url=url, config=config)
+
+        try:
+            response = requests.put(url, headers=headers, data=json.dumps(config))
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.error("Failed to create or update connector", error=str(e))
+            raise
