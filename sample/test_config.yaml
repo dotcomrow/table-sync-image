@@ -6,12 +6,12 @@ mock: false
 
 yugabytedb:
   mock: false
-  host: localhost
+  host: yugabytedb  # Corrected hostname for YugabyteDB
   port: 5433
   user: yugabyte
   password: yugabyte
   database: testdb
-  master_addresses: "localhost:7100"
+  master_addresses: "yugabytedb:7100"  # Corrected master address
 
 bigquery:
   mock: true
@@ -21,9 +21,9 @@ bigquery:
 
 kafka_connect:
   mock: false
-  url: http://localhost:8083
+  url: http://kafka_connect:8083  # Updated to match the Kafka Connect service name
   recreate_failed_connectors: true
-  bootstrap: localhost:9092
+  bootstrap: kafka:9092  # Corrected bootstrap server for Kafka
 
 logging:
   level: DEBUG
