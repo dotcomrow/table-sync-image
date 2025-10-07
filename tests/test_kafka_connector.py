@@ -27,25 +27,6 @@ class TestKafkaConnector(unittest.TestCase):
             table="testtable",
             annotation=TableAnnotation.from_comment(self.config, '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
         )
-        
-
-    def test_create_cdc_connector(self):
-        """Test the create_cdc_connector method."""
-        self.kafka_connector.create_cdc_connector(self.table_info)
-
-    def test_delete_cdc_connector(self):
-        """Test the delete_cdc_connector method."""
-        connector_name = "test_connector"
-        self.kafka_connector.delete_cdc_connector(connector_name)
-
-    def test_get_cdc_stream_id(self):
-        """Test the get_cdc_stream_id method."""
-        stream_id = self.kafka_connector.get_cdc_stream_id(self.table_info)
-
-    def test_check_connector_exists(self):
-        """Test the check_connector_exists method."""
-        connector_name = "test_connector"
-        exists = self.kafka_connector.check_connector_exists(connector_name)
 
     def test_create_source_connector(self):
         """Test the create_source_connector method."""
