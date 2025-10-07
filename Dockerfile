@@ -6,20 +6,6 @@ ARG BUILD_TIMESTAMP
 ARG GIT_COMMIT
 ARG GIT_TAG
 
-# Yugabyte inputs:
-# 1) Provide a direct tarball URL (best):
-#    --build-arg YB_TARBALL_URL=https://downloads.yugabyte.com/releases/2.20.0.0/yugabyte-2.20.0.0-b42-linux-x86_64.tar.gz
-# 2) Or provide version + build:
-#    --build-arg YB_VERSION=2.20.0.0 --build-arg YB_BUILD=42
-# 3) Or just version (auto-discover build by scraping the release index page):
-#    --build-arg YB_VERSION=2.20.0.0
-
-ARG YB_VERSION="2025.1.0.1"
-ARG YB_BUILD="3"
-ARG YB_ARCH="linux-x86_64"
-ARG YB_DOWNLOAD_URL="https://software.yugabyte.com"
-ARG YB_TARBALL_URL=""
-
 # For macOS builds (e.g., Apple M1/M2), set YB_OS to "darwin" to fetch the appropriate binary
 # ONLY SET FOR TESTING ON MACOS HOSTS - DO NOT USE IN PRODUCTION
 ARG YB_OS="darwin" 
@@ -40,33 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # --- Install yb-admin (supports amd64 and arm64) ---
 RUN set -eux; \
-    os="${YB_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"; \
-    arch="$(dpkg --print-architecture || uname -m)"; \
-    case "$arch" in \
-      amd64|x86_64) yb_arch="linux-x86_64" ;; \
-      arm64|aarch64) yb_arch="linux-aarch64" ;; \
-      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
-    esac; \
-    if [ "$os" = "darwin" ]; then \
-      yb_arch="darwin-arm64"; \
-    fi; \
-    url=""; \
-    if [ -n "${YB_TARBALL_URL}" ]; then \
-      url="${YB_TARBALL_URL}"; \
-    elif [ -n "${YB_BUILD}" ]; then \
-      url="${YB_DOWNLOAD_URL}/releases/${YB_VERSION}/yugabyte-${YB_VERSION}-b${YB_BUILD}-${yb_arch}.tar.gz"; \
-    else \
-      index="${YB_DOWNLOAD_URL}/releases/${YB_VERSION}/"; \
-      echo "Discovering Yugabyte tarball via ${index} ..."; \
-      fname="$(curl -fsSL "$index" | grep -Eo "yugabyte-${YB_VERSION}-b[0-9]+-${yb_arch}\.tar\.gz" | head -n1 || true)"; \
-      if [ -n "$fname" ]; then \
-        url="${index}${fname}"; \
-      fi; \
-    fi; \
-    if [ -z "$url" ]; then \
-      echo "ERROR: Could not determine Yugabyte tarball URL. Provide YB_TARBALL_URL or YB_BUILD with YB_VERSION, or ensure the index page is reachable." >&2; \
-      exit 1; \
-    fi; \
+    url="https://software.yugabyte.com/releases/2025.1.1.1/yugabyte-2025.1.1.1-b1-linux-x86_64.tar.gz"; \
     echo "Downloading $url"; \
     curl -fsSL "$url" -o /tmp/yb.tar.gz; \
     ybdir="$(tar -tzf /tmp/yb.tar.gz | head -n1 | cut -d/ -f1)"; \

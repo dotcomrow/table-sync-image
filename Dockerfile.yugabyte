@@ -1,0 +1,14 @@
+# Use the official YugabyteDB image as the base
+FROM yugabytedb/yugabyte:latest
+
+# Set the working directory
+WORKDIR /home/yugabyte
+
+# Copy the initialization scripts into the container
+COPY init-scripts/ /docker-entrypoint-initdb.d/
+
+# Ensure the startup script is executable
+RUN chmod +x /docker-entrypoint-initdb.d/*
+
+# Set the custom entrypoint
+ENTRYPOINT ["/bin/bash", "/docker-entrypoint-initdb.d/startup.sh"]

@@ -32,16 +32,16 @@ services:
       - "9093:9093"
 
   yugabytedb:
-    image: yugabytedb/yugabyte:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.yugabyte
     container_name: yugabytedb
-    command: [ "bin/yugabyted", "start", "--daemon=false" ]
+    entrypoint: ["/bin/bash", "-c", "/docker-entrypoint-initdb.d/startup.sh"]
     ports:
       - "5433:5433"
       - "7001:7000"
     environment:
       YB_MASTER_ADDRESSES: "yugabytedb:7100"
-    volumes:
-      - ./init-scripts:/docker-entrypoint-initdb.d
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://yugabytedb:7000" ]
       interval: 30s
@@ -62,6 +62,9 @@ services:
       - ./test_target.txt:/app/test_target.txt
 
   kafka_connect:
+    build:
+      context: .
+      dockerfile: Dockerfile.kafka_connect
     image: confluentinc/cp-kafka-connect:latest
     container_name: kafka_connect
     depends_on:
@@ -81,5 +84,16 @@ services:
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_PLUGIN_PATH: "/plugins"
+      CONNECT_BIGQUERY_PROJECT: "your-gcp-project-id"
+      CONNECT_BIGQUERY_KEYFILE: "/path/to/your/keyfile.json"
+      CONNECT_BIGQUERY_SINK_TASKS_MAX: "1"
+      CONNECT_BIGQUERY_SINK_TOPICS: "your-topic-name"
+      CONNECT_BIGQUERY_SINK_SCHEMA_RETRIEVAL_MODE: "AUTO"
+      CONNECT_BIGQUERY_SINK_TABLE_CREATE: "true"
+      CONNECT_BIGQUERY_SINK_TABLE_CREATE_IF_NOT_EXISTS: "true"
+      CONNECT_BIGQUERY_SINK_TABLE_CREATE_PARTITIONED: "true"
+      CONNECT_BIGQUERY_SINK_TABLE_CREATE_CLUSTERED: "true"
+      CONNECT_BIGQUERY_SINK_TABLE_CREATE_CLUSTERED_COLUMNS: "column1,column2"
     ports:
       - "8083:8083"

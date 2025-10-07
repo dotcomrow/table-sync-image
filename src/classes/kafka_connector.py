@@ -6,12 +6,19 @@ from typing import Optional
 
 import structlog
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, LoggingKeys, YugabyteDBKeys
+from classes.table_info import TableInfo
 
 class KafkaConnector:
     def __init__(self, config):
         self.config = config
         self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
         self.logger = self._init_logger()
+        db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
+        self.host = db_cfg.get('host', 'localhost')
+        self.port = db_cfg.get('port', 5433)
+        self.user = db_cfg.get('user', 'yugabyte')
+        self.password = db_cfg.get('password', 'yugabyte')
+        self.database = db_cfg.get('database', 'yugabyte')
         
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
@@ -186,20 +193,24 @@ class KafkaConnector:
             self.logger.error("Exception while fetching Kafka connector status", error=str(e))
             return None
 
-    def create_source_connector(self, db_name, schema_name, table_name, stream_id, pg_host, pg_port, pg_user, pg_password, connect_url):
+    def create_source_connector(self, db_name, schema_name, table_info: TableInfo):
         """Create a source connector for a specific table in YugabyteDB."""
-        self.logger.info("Creating source connector", db_name=db_name, schema_name=schema_name, table_name=table_name)
+        
+        # first, create a stream
+        stream_id = self.get_cdc_stream_id(table_info)
+        
+        self.logger.info("Creating source connector", db_name=db_name, schema_name=schema_name, table_name=table_info.table)
         source_config = {
             "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
             "tasks.max": "1",
-            "database.hostname": pg_host,
-            "database.port": pg_port,
-            "database.user": pg_user,
-            "database.password": pg_password,
+            "database.hostname": self.host,
+            "database.port": self.port,
+            "database.user": self.user,
+            "database.password": self.password,
             "database.dbname": db_name,
-            "database.server.name": f"yb_{db_name}_{schema_name}_{table_name}",
+            "database.server.name": f"yb_{db_name}_{schema_name}_{table_info.table}",
             "database.stream.id": stream_id,
-            "table.include.list": f"{schema_name}.{table_name}",
+            "table.include.list": f"{schema_name}.{table_info.table}",
             "snapshot.mode": "initial",
             "incremental.snapshot.enabled": "true",
             "signal.data.collection": "public.debezium_signal",
@@ -211,10 +222,10 @@ class KafkaConnector:
             "topic.creation.default.cleanup.policy": "delete"
         }
 
-        response = self._send_connector_request(connect_url, f"yb-source-{db_name}-{schema_name}-{table_name}", source_config)
+        response = self._send_connector_request(f"yb-source-{db_name}-{schema_name}-{table_info.table}", source_config)
         self.logger.info("Source connector created", response=response)
 
-    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_project, bq_default_dataset, connect_url):
+    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_project, bq_default_dataset):
         """Create a sink connector for a specific table in BigQuery."""
         self.logger.info("Creating sink connector", db_name=db_name, table_name=table_name)
         sink_config = {
@@ -251,15 +262,15 @@ class KafkaConnector:
             "consumer.override.auto.offset.reset": "earliest"
         }
 
-        response = self._send_connector_request(connect_url, f"bq-sink-{db_name}-{table_name}", sink_config)
+        response = self._send_connector_request(f"bq-sink-{db_name}-{table_name}", sink_config)
         self.logger.info("Sink connector created", response=response)
 
-    def _send_connector_request(self, connect_url, connector_name, config):
+    def _send_connector_request(self, connector_name, config):
         """Helper method to send a request to create or update a connector."""
         import requests
         import json
 
-        url = f"{connect_url}/connectors/{connector_name}/config"
+        url = f"{self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)}/connectors/{connector_name}/config"
         headers = {"Content-Type": "application/json"}
         self.logger.debug("Sending connector request", url=url, config=config)
 
