@@ -35,7 +35,7 @@ ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
 
 # System deps: curl/tar/grep for discovery, netcat for health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tar grep netcat-traditional \
+      ca-certificates curl tar grep netcat-traditional git \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Install yb-admin (supports amd64 and arm64) ---
@@ -85,11 +85,36 @@ RUN chown cdc_user:cdc_user /app
 COPY src/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install debugpy for debugging
-RUN pip install --no-cache-dir debugpy
+RUN git config --global user.name "YourUsername" && \
+    git config --global user.email "youremail@example.com"
+
+# Install build tools and build debugpy from source
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make \
+    && pip install --no-cache-dir --force-reinstall git+https://github.com/microsoft/debugpy.git \
+    && apt-get remove -y gcc g++ make \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Explicitly handle aarch64 architecture for compiling attach_aarch64.so
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake openssh-client \
+    && mkdir -p ~/.ssh \
+    && chmod 700 ~/.ssh \
+    && ssh-keyscan github.com >> ~/.ssh/known_hosts \
+    && git clone https://github.com/microsoft/debugpy.git /tmp/debugpy \
+    && cd /tmp/debugpy/src/debugpy/_vendored/pydevd/pydevd_attach_to_process/linux_and_mac \
+    && g++ -std=c++11 -shared -fPIC -O2 -D_FORTIFY_SOURCE=2 -nostartfiles attach.cpp -o attach_aarch64.so \
+    && cp attach_aarch64.so /usr/local/lib/python3.11/site-packages/debugpy/_vendored/pydevd/pydevd_attach_to_process/ \
+    && apt-get remove -y gcc g++ make cmake openssh-client \
+    && apt-get autoremove -y \
+    && rm -rf /tmp/debugpy \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # --- Application code ---
 COPY src/ ./src/
+
+# Copy the tests directory explicitly
+COPY tests/ ./tests/
 
 # --- Healthcheck ---
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
@@ -101,22 +126,19 @@ USER cdc_user
 # --- Expose health port ---
 EXPOSE 8080
 
-# --- Entrypoint ---
-ARG MODE
-ENV MODE=$MODE
+# --- Debug logs directory ---
+ENV DEBUGPY_LOG_DIR="/app/debug_logs"
+ENV DEBUGPY_FORCE_PYTHON=1
+
+# Ensure the PYTHONPATH includes the root directory and the tests directory
+ENV PYTHONPATH=/app/src:/app/tests
 
 # --- Copy test config ---
 COPY /sample/test_config.yaml /app/sample/test_config.yaml
 
-# Add a script to handle dynamic command selection
-COPY entrypoint.sh /entrypoint.sh
-CMD ["/entrypoint.sh"]
-
 # Set the working directory to /app
 WORKDIR /app
 
-# Ensure the PYTHONPATH includes the root directory and the tests directory
-ENV PYTHONPATH=/app:/app/tests
-
-# Copy the tests directory explicitly
-COPY tests/ ./tests/
+# Add a script to handle dynamic command selection
+COPY entrypoint.sh /app/entrypoint.sh
+CMD ["/app/entrypoint.sh"]

@@ -2,13 +2,6 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run Test Runner Container",
-            "type": "shell",
-            "command": "docker-compose",
-            "args": ["-f", "docker-compose.test.yaml", "up", "-d", "test_runner"],
-            "problemMatcher": []
-        },
-        {
             "label": "Stop Test Runner Container",
             "type": "shell",
             "command": "docker-compose",
@@ -18,7 +11,15 @@
         {
             "label": "Start Test Runner with Target File",
             "type": "shell",
-            "command": "basename ${file} .py > test_target.txt && docker-compose -f docker-compose.test.yaml up -d test_runner",
+            "command": "sleep 5 && basename ${file} .py > test_target.txt && docker-compose -f docker-compose.test.yaml up -d test_runner && sleep 5 && docker inspect -f '{{.State.Health.Status}}' test_runner | grep -q healthy",
+            "problemMatcher": [],
+            "dependsOn": ["Build Test Runner Image with SSH"]
+        },
+        {
+            "label": "Build Test Runner Image with SSH",
+            "type": "shell",
+            "command": "docker",
+            "args": ["build", "--ssh", "default", "-f", "Dockerfile.test", "-t", "test_runner", "."],
             "problemMatcher": []
         }
     ]
