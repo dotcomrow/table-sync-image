@@ -50,7 +50,7 @@ class TestKafkaConnector(unittest.TestCase):
     def test_create_source_connector(self):
         """Test the create_source_connector method."""
         self.kafka_connector.create_source_connector(
-            "testdb", "public", "testtable", "test_stream_id"
+            "testdb", "public", self.table_info
         )
 
     def test_create_sink_connector(self):

@@ -201,7 +201,7 @@ class KafkaConnector:
         
         self.logger.info("Creating source connector", db_name=db_name, schema_name=schema_name, table_name=table_info.table)
         source_config = {
-            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+            "plugin.name": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
             "tasks.max": "1",
             "database.hostname": self.host,
             "database.port": self.port,
@@ -222,6 +222,8 @@ class KafkaConnector:
             "topic.creation.default.cleanup.policy": "delete"
         }
 
+        self.logger.debug("Source connector configuration", source_config=source_config)
+
         response = self._send_connector_request(f"yb-source-{db_name}-{schema_name}-{table_info.table}", source_config)
         self.logger.info("Source connector created", response=response)
 
@@ -229,7 +231,7 @@ class KafkaConnector:
         """Create a sink connector for a specific table in BigQuery."""
         self.logger.info("Creating sink connector", db_name=db_name, table_name=table_name)
         sink_config = {
-            "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+            "plugin.name": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
             "tasks.max": "1",
             "topics": topic,
             "topic2TableMap": f"{topic}:{table_name}",
@@ -273,6 +275,7 @@ class KafkaConnector:
         url = f"{self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)}/connectors/{connector_name}/config"
         headers = {"Content-Type": "application/json"}
         self.logger.debug("Sending connector request", url=url, config=config)
+        self.logger.debug("Connector request payload", payload=json.dumps(config))
 
         try:
             response = requests.put(url, headers=headers, data=json.dumps(config))
