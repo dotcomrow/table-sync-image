@@ -96,5 +96,5 @@ COPY /sample/test_config.yaml /app/sample/test_config.yaml
 WORKDIR /app
 
 # Add a script to handle dynamic command selection
-COPY entrypoint.sh /app/entrypoint.sh
+COPY /init-scripts/entrypoint.sh /app/entrypoint.sh
 CMD ["/app/entrypoint.sh"]
