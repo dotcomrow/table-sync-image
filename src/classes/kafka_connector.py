@@ -14,11 +14,13 @@ class KafkaConnector:
         self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
         self.logger = self._init_logger()
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
-        self.host = db_cfg.get('host', 'localhost')
-        self.port = db_cfg.get('port', 5433)
-        self.user = db_cfg.get('user', 'yugabyte')
-        self.password = db_cfg.get('password', 'yugabyte')
-        self.database = db_cfg.get('database', 'yugabyte')
+        self.host = db_cfg.get(YugabyteDBKeys.HOST.value, 'localhost')
+        self.port = db_cfg.get(YugabyteDBKeys.PORT.value, 5433)
+        self.user = db_cfg.get(YugabyteDBKeys.USER.value, 'yugabyte')
+        self.password = db_cfg.get(YugabyteDBKeys.PASSWORD.value, 'yugabyte')
+        self.database = db_cfg.get(YugabyteDBKeys.DATABASE.value, 'yugabyte')
+        self.db_master_addresses = db_cfg.get(YugabyteDBKeys.MASTER_ADDRESSES.value, None)
+        self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
@@ -160,93 +162,98 @@ class KafkaConnector:
             return None
 
     def create_source_connector(self, db_name, schema_name, table_info: TableInfo):
-        """Create a source connector for a specific table in YugabyteDB."""
-        
-        # first, create a stream
         stream_id = self.get_cdc_stream_id(table_info)
-        
-        self.logger.info("Creating source connector", db_name=db_name, schema_name=schema_name, table_name=table_info.table)
+
         source_config = {
-            "plugin.name": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
             "tasks.max": "1",
             "database.hostname": self.host,
-            "database.port": self.port,
+            "database.port": str(self.port),
+            "database.master.addresses": self.db_master_addresses,  # NEW
             "database.user": self.user,
             "database.password": self.password,
             "database.dbname": db_name,
             "database.server.name": f"yb_{db_name}_{schema_name}_{table_info.table}",
-            "database.stream.id": stream_id,
+            "database.streamid": stream_id,                      # FIXED
             "table.include.list": f"{schema_name}.{table_info.table}",
             "snapshot.mode": "initial",
-            "incremental.snapshot.enabled": "true",
-            "signal.data.collection": "public.debezium_signal",
             "transforms": "unwrap",
+            #"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",  # FIXED
             "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
             "transforms.unwrap.delete.handling.mode": "none",
             "topic.creation.default.replication.factor": "1",
             "topic.creation.default.partitions": "1",
-            "topic.creation.default.cleanup.policy": "delete"
+            "topic.creation.default.cleanup.policy": "delete",
         }
 
         self.logger.debug("Source connector configuration", source_config=source_config)
-
-        response = self._send_connector_request(f"yb-source-{db_name}-{schema_name}-{table_info.table}", source_config)
+        name = f"yb-source-{db_name}-{schema_name}-{table_info.table}"
+        response = self._send_connector_request(name, source_config)
         self.logger.info("Source connector created", response=response)
 
+
     def create_sink_connector(self, db_name, table_name, topic, dataset, bq_project, bq_default_dataset):
-        """Create a sink connector for a specific table in BigQuery."""
-        self.logger.info("Creating sink connector", db_name=db_name, table_name=table_name)
         sink_config = {
-            "plugin.name": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+            "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
             "tasks.max": "1",
-            "topics": topic,
-            "topic2TableMap": f"{topic}:{table_name}",
-            "datasets": f"{topic}:{dataset}",
-            "project": bq_project,
-            "defaultDataset": bq_default_dataset,
-            "sanitizeTopics": "false",
+
+            # Topics
+            "topics": topic,                                    # e.g., "yb_db_schema_table"
+            "topic2TableMap": f"{topic}:{table_name}",          # e.g., "yb_db_schema_table:testtable"
+
+            # BigQuery target(s)
+            "project": bq_project,                              # e.g., "test_project"
+            "defaultDataset": bq_default_dataset,               # e.g., "raw"
+            "datasets": f"{topic}:{dataset}",                   # e.g., "yb_db_schema_table:raw"
+
+            # Auth
+            "keySource": "FILE",
+            "keyfile": "/vault/secrets/gcp-key.json",
+
+            # Table creation / schema behavior
             "autoCreateTables": "true",
             "autoUpdateSchemas": "false",
             "allowNewBigQueryFields": "false",
+            "sanitizeTopics": "false",                          # ok since you map explicitly
+            "sanitizeFieldNames": "false",
+
+            # Debezium-friendly upsert/delete
             "upsertEnabled": "true",
             "deleteEnabled": "true",
-            "primaryKeyMode": "record_value",
-            "primaryKeyFields": "id",
-            "errors.tolerance": "all",
-            "errors.log.enable": "true",
-            "errors.deadletterqueue.topic.name": "bq-dlq",
-            "errors.deadletterqueue.context.headers.enable": "true",
-            "errors.deadletterqueue.topic.replication.factor": "1",
-            "errors.deadletterqueue.topic.partitions": "1",
+            "primaryKeyMode": "record_key",                     # REQUIRED when upsertEnabled=true
+            "kafkaKeyFieldName": "id",  
+            # (No primaryKeyFields needed for record_key mode)
+
+            # Converters (must carry schemas for BQ sink)
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "true",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "true",
+
+            # Consumer start position for new sink
+            "consumer.override.auto.offset.reset": "earliest",
+
+            # Retries / merges
             "enableRetries": "true",
             "bigQueryRetry": "6",
             "bigQueryRetryWait": "2000",
-            "keySource": "FILE",
-            "keyfile": "/vault/secrets/gcp-key.json",
-            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "value.converter.schemas.enable": "true",
-            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "key.converter.schemas.enable": "true",
-            "consumer.override.auto.offset.reset": "earliest"
+            "mergeIntervalMs": "60000"
         }
 
-        response = self._send_connector_request(f"bq-sink-{db_name}-{table_name}", sink_config)
+        name = f"bq-sink-{db_name}-{table_name}"
+        response = self._send_connector_request(name, sink_config)
         self.logger.info("Sink connector created", response=response)
 
-    def _send_connector_request(self, connector_name, config):
-        """Helper method to send a request to create or update a connector."""
-        import requests
-        import json
-
-        url = f"{self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)}/connectors/{connector_name}/config"
-        headers = {"Content-Type": "application/json"}
-        self.logger.debug("Sending connector request", url=url, config=config)
-        self.logger.debug("Connector request payload", payload=json.dumps(config))
-
-        try:
-            response = requests.put(url, headers=headers, data=json.dumps(config))
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Failed to create or update connector", error=str(e))
-            raise
+    def _send_connector_request(self, name: str, config: dict):
+        url = f"{self.kc_url}/connectors/{name}/config"
+        payload = {"name": name, "config": config}
+        # The Configs API expects just {"config": ...} for PUT to /config in some distros;
+        # adjust if your worker expects raw 'config' (common). If 400, try sending just 'config'.
+        import requests, json
+        r = requests.put(url, headers={"Content-Type": "application/json"},
+                        data=json.dumps(config))  # <-- many workers want just the config map
+        if r.status_code >= 400:
+            self.logger.error("Connector config rejected",
+                            status=r.status_code, response=r.text, sent_config=config)
+            raise RuntimeError(f"Kafka Connect error {r.status_code}: {r.text}")
+        return r.json()

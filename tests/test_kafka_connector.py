@@ -1,9 +1,7 @@
 import unittest
 import os
-import time
 from unittest.mock import patch
 import sys
-import subprocess
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
 from classes.bigquery_manager import BigQueryManager

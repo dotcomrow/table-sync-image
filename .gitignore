@@ -11,3 +11,4 @@ ENV/
 env.bak/
 venv.bak/
 test_target.txt
+gcp-key.json

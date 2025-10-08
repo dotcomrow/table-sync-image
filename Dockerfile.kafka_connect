@@ -67,3 +67,6 @@ RUN set -eu && \
     fi && \
     echo "[FETCH-YB] Installed files:" && \
     find /plugins/yb -maxdepth 2 -type f -name '*.jar' -print | sed 's/^/  /'
+
+COPY gcp-key.json /vault/secrets/gcp-key.json
+ENV GOOGLE_APPLICATION_CREDENTIALS=/vault/secrets/gcp-key.json
