@@ -91,6 +91,7 @@ ENV PYTHONPATH=/app/src:/app/tests
 
 # --- Copy test config ---
 COPY /sample/test_config.yaml /app/sample/test_config.yaml
+COPY gcp-key.json /vault/secrets/gcp-key.json
 
 # Set the working directory to /app
 WORKDIR /app

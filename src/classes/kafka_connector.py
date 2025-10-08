@@ -3,6 +3,7 @@ import re
 import subprocess
 import os
 from typing import Optional
+import json
 
 import structlog
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, LoggingKeys, YugabyteDBKeys
@@ -191,8 +192,19 @@ class KafkaConnector:
         response = self._send_connector_request(name, source_config)
         self.logger.info("Source connector created", response=response)
 
+    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_default_dataset):
+        # Load the project ID from the GCP key file
+        keyfile_path = "/vault/secrets/gcp-key.json"
+        try:
+            with open(keyfile_path, "r") as keyfile:
+                gcp_key_data = json.load(keyfile)
+                bq_project = gcp_key_data.get("project_id")
+                if not bq_project:
+                    raise ValueError("project_id not found in GCP key file")
+        except Exception as e:
+            self.logger.error("Failed to load project_id from GCP key file", error=str(e))
+            raise
 
-    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_project, bq_default_dataset):
         sink_config = {
             "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
             "tasks.max": "1",
@@ -202,13 +214,13 @@ class KafkaConnector:
             "topic2TableMap": f"{topic}:{table_name}",          # e.g., "yb_db_schema_table:testtable"
 
             # BigQuery target(s)
-            "project": bq_project,                              # e.g., "test_project"
+            "project": bq_project,                              # Loaded from GCP key file
             "defaultDataset": bq_default_dataset,               # e.g., "raw"
             "datasets": f"{topic}:{dataset}",                   # e.g., "yb_db_schema_table:raw"
 
             # Auth
             "keySource": "FILE",
-            "keyfile": "/vault/secrets/gcp-key.json",
+            "keyfile": keyfile_path,
 
             # Table creation / schema behavior
             "autoCreateTables": "true",

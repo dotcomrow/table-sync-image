@@ -35,7 +35,7 @@ class TestKafkaConnector(unittest.TestCase):
     def test_create_sink_connector(self):
         """Test the create_sink_connector method."""
         self.kafka_connector.create_sink_connector(
-            "testdb", "testtable", "test_topic", "test_dataset", "test_project", "test_default_dataset"
+            "testdb", "testtable", "test_topic", "test_dataset", "test_default_dataset"
         )
 
 if __name__ == "__main__":
