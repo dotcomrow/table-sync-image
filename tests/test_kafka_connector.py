@@ -18,13 +18,6 @@ class TestKafkaConnector(unittest.TestCase):
         self.yugabyte_manager = YugabyteDBManager(self.config)
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
-        
-        self.table_info = TableInfo(
-            database="testdb",
-            schema="public",
-            table="testtable",
-            annotation=TableAnnotation.from_comment(self.config, '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
-        )
 
     def test_create_source_connector(self):
         """Test the create_source_connector method."""
@@ -35,7 +28,7 @@ class TestKafkaConnector(unittest.TestCase):
     def test_create_sink_connector(self):
         """Test the create_sink_connector method."""
         self.kafka_connector.create_sink_connector(
-            "testdb", "testtable", "test_topic", "test_dataset", "test_default_dataset"
+            "testdb", "testtable", "test_topic"
         )
 
 if __name__ == "__main__":

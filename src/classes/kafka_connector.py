@@ -162,7 +162,7 @@ class KafkaConnector:
             self.logger.error("Exception while fetching Kafka connector status", error=str(e))
             return None
 
-    def create_source_connector(self, db_name, schema_name, table_info: TableInfo):
+    def create_source_connector(self, table_info: TableInfo):
         stream_id = self.get_cdc_stream_id(table_info)
 
         source_config = {
@@ -173,13 +173,12 @@ class KafkaConnector:
             "database.master.addresses": self.db_master_addresses,  # NEW
             "database.user": self.user,
             "database.password": self.password,
-            "database.dbname": db_name,
-            "database.server.name": f"yb_{db_name}_{schema_name}_{table_info.table}",
+            "database.dbname": table_info.database,
+            "database.server.name": f"yb_{table_info.database}_{table_info.schema}_{table_info.table}",
             "database.streamid": stream_id,                      # FIXED
-            "table.include.list": f"{schema_name}.{table_info.table}",
+            "table.include.list": f"{table_info.schema}.{table_info.table}",
             "snapshot.mode": "initial",
             "transforms": "unwrap",
-            #"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",  # FIXED
             "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
             "transforms.unwrap.delete.handling.mode": "none",
             "topic.creation.default.replication.factor": "1",
@@ -188,11 +187,11 @@ class KafkaConnector:
         }
 
         self.logger.debug("Source connector configuration", source_config=source_config)
-        name = f"yb-source-{db_name}-{schema_name}-{table_info.table}"
+        name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         response = self._send_connector_request(name, source_config)
         self.logger.info("Source connector created", response=response)
 
-    def create_sink_connector(self, db_name, table_name, topic, dataset, bq_default_dataset):
+    def create_sink_connector(self, table_info: TableInfo):
         # Load the project ID from the GCP key file
         keyfile_path = "/vault/secrets/gcp-key.json"
         try:
@@ -205,18 +204,20 @@ class KafkaConnector:
             self.logger.error("Failed to load project_id from GCP key file", error=str(e))
             raise
 
+        topic = f"topic_{table_info.schema}_{table_info.table}"
+
         sink_config = {
             "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
             "tasks.max": "1",
 
             # Topics
             "topics": topic,                                    # e.g., "yb_db_schema_table"
-            "topic2TableMap": f"{topic}:{table_name}",          # e.g., "yb_db_schema_table:testtable"
+            "topic2TableMap": f"{topic}:{table_info.table}",          # e.g., "yb_db_schema_table:testtable"
 
             # BigQuery target(s)
             "project": bq_project,                              # Loaded from GCP key file
-            "defaultDataset": bq_default_dataset,               # e.g., "raw"
-            "datasets": f"{topic}:{dataset}",                   # e.g., "yb_db_schema_table:raw"
+            "defaultDataset": "raw",               # e.g., "raw"
+            "datasets": f"{topic}:{table_info.schema}",                   # e.g., "yb_db_schema_table:raw"
 
             # Auth
             "keySource": "FILE",
@@ -252,7 +253,7 @@ class KafkaConnector:
             "mergeIntervalMs": "60000"
         }
 
-        name = f"bq-sink-{db_name}-{table_name}"
+        name = f"bq-sink-{table_info.database}-{table_info.table}"
         response = self._send_connector_request(name, sink_config)
         self.logger.info("Sink connector created", response=response)
 

@@ -10,3 +10,6 @@ CREATE TABLE public.testtable (
 
 COMMENT ON TABLE public.testtable IS
 '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}';
+
+INSERT INTO public.testtable (name) VALUES ('Sample Name 1'), ('Sample Name 2');
+INSERT INTO public.testtable (name) VALUES ('Sample Name 3'), ('Sample Name 4');
