@@ -8,6 +8,12 @@ CREATE TABLE public.testtable (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS public.debezium_signal (
+  id   text PRIMARY KEY,
+  type text NOT NULL,
+  data jsonb
+);
+
 COMMENT ON TABLE public.testtable IS
 '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}';
 

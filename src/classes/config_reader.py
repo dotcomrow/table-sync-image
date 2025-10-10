@@ -46,6 +46,7 @@ class BigQueryKeys(Enum):
     
 class KafkaConnectKeys(Enum):
     URL = "url"
+    SCHEMA_REGISTRY_URL = "schema_registry_url"
     RECREATE_FAILED_CONNECTORS = "recreate_failed_connectors"
     MOCK = "mock"
     BOOTSTRAP = "bootstrap"

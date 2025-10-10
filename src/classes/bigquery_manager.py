@@ -3,7 +3,7 @@ import os
 import subprocess
 import re
 from typing import List
-
+from google.oauth2 import service_account
 import structlog
 from classes.config_reader import ConfigKeys, LoggingKeys, BigQueryKeys
 
@@ -22,8 +22,9 @@ class BigQueryManager:
                 self.client = MagicMock()
             else:
                 self.logger.info("Initializing BigQuery client")
-                self.client = bigquery.Client()
-            
+                credentials = service_account.Credentials.from_service_account_file("/vault/secrets/gcp-key.json")
+                self.client = bigquery.Client(credentials=credentials)
+
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
         lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.value, {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
@@ -110,7 +111,7 @@ class BigQueryManager:
         self._initialize_client()
         self.logger.info("Checking if table exists in BigQuery", dataset_id=dataset_id, table_id=table_id)
         try:
-            self.client.get_table(self.client.dataset(dataset_id).table(table_id))
+            resp = self.client.get_table(self.client.dataset(dataset_id).table(table_id))
             self.logger.info("Table exists", dataset_id=dataset_id, table_id=table_id)
             return True
         except Exception as e:

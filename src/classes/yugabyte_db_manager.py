@@ -3,6 +3,7 @@ import psycopg2
 from typing import Any, List
 import re
 import os
+import json
 
 import structlog
 from classes.config_reader import ConfigKeys, LoggingKeys, YugabyteDBKeys
@@ -202,3 +203,22 @@ class YugabyteDBManager:
 
         self.logger.error("Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
+
+    def insert_debezium_signal(self, table_info: TableInfo):
+        """Insert a record into the public.debezium_signal table."""
+        query = """
+        INSERT INTO public.debezium_signal (id, type, data)
+        VALUES (
+          %s,
+          'execute-snapshot',
+          %s
+        );
+        """
+        data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
+        self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data)
+        try:
+            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data])
+            self.logger.info("Record inserted successfully", table_name=table_info.table)
+        except Exception as e:
+            self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
+            raise RuntimeError(f"Failed to insert record into debezium_signal table: {e}")

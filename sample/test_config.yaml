@@ -14,7 +14,7 @@ yugabytedb:
   master_addresses: "yugabytedb:7100"  # Corrected master address
 
 bigquery:
-  mock: true
+  mock: false
   project_id: k8s-kafka-774d
   credentials_path: /vault/secrets/gcp-key.json
   location: US
@@ -22,6 +22,7 @@ bigquery:
 kafka_connect:
   mock: false
   url: http://kafka_connect:8083  # Updated to match the Kafka Connect service name
+  schema_registry_url: http://schema-registry:8081
   recreate_failed_connectors: true
   bootstrap: kafka:9092  # Corrected bootstrap server for Kafka
 

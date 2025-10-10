@@ -7,7 +7,8 @@ from classes.config_reader import ConfigReader, BigQueryKeys
 @dataclass
 class TableAnnotation:
     enabled: bool
-    bq_target: str  # "dataset.table"
+    bq_dataset: Optional[str] = None  # extracted from bq_target
+    bq_table: Optional[str] = None    # extracted from bq_target
     cdc_stream_id: Optional[str] = None  # optional per-table override
     default_backup_dataset: Optional[str] = None  # optional default backup dataset
 
@@ -25,7 +26,8 @@ class TableAnnotation:
                 return None
             return cls(
                 enabled=bool(bootstrap.get("enabled", False)),
-                bq_target=str(bootstrap.get("bq", "")).strip(),
+                bq_dataset=str(bootstrap.get("bq", "")).strip().split(".")[0],
+                bq_table=str(bootstrap.get("bq", "")).strip().split(".")[1] if "." in str(bootstrap.get("bq", "")).strip() else None,
                 cdc_stream_id=(bootstrap.get("cdc_stream_id") or None),
                 default_backup_dataset=config.get(BigQueryKeys.DEFAULT_BACKUP_DATASET.value, "yugabyte_backup"),
             )

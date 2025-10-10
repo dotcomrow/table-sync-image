@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
@@ -30,6 +32,21 @@ services:
     ports:
       - "9092:9092"
       - "9093:9093"
+
+  # New: Confluent Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    container_name: schema-registry
+    depends_on:
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_HOST_NAME: "schema-registry"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "PLAINTEXT://kafka:9092"
+      SCHEMA_REGISTRY_COMPATIBILITY_LEVEL: "BACKWARD"
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: "_schemas"
+    ports:
+      - "8081:8081"
 
   yugabytedb:
     build:
@@ -68,6 +85,7 @@ services:
     container_name: kafka_connect
     depends_on:
       - kafka
+      - schema-registry
     environment:
       CONNECT_BOOTSTRAP_SERVERS: kafka:9092
       CONNECT_REST_PORT: 8083
@@ -75,25 +93,30 @@ services:
       CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
       CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
       CONNECT_STATUS_STORAGE_TOPIC: "connect-statuses"
-      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
-      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+
+      # Use Avro + Schema Registry for Kafka record serialization
+      CONNECT_KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONNECT_KEY_CONVERTER_AUTO_REGISTER_SCHEMAS: "true"
+      CONNECT_VALUE_CONVERTER_AUTO_REGISTER_SCHEMAS: "true"
+
+      # Internal converters can stay JSON
       CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+
       CONNECT_REST_ADVERTISED_HOST_NAME: kafka_connect
       CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_PLUGIN_PATH: "/plugins"
+
+      # Example BigQuery envs (your connector-specific config still goes in the POST/PUT body)
       CONNECT_BIGQUERY_PROJECT: "your-gcp-project-id"
-      CONNECT_BIGQUERY_KEYFILE: "/path/to/your/keyfile.json"
-      CONNECT_BIGQUERY_SINK_TASKS_MAX: "1"
-      CONNECT_BIGQUERY_SINK_TOPICS: "your-topic-name"
-      CONNECT_BIGQUERY_SINK_SCHEMA_RETRIEVAL_MODE: "AUTO"
-      CONNECT_BIGQUERY_SINK_TABLE_CREATE: "true"
-      CONNECT_BIGQUERY_SINK_TABLE_CREATE_IF_NOT_EXISTS: "true"
-      CONNECT_BIGQUERY_SINK_TABLE_CREATE_PARTITIONED: "true"
-      CONNECT_BIGQUERY_SINK_TABLE_CREATE_CLUSTERED: "true"
-      CONNECT_BIGQUERY_SINK_TABLE_CREATE_CLUSTERED_COLUMNS: "column1,column2"
+      CONNECT_BIGQUERY_KEYFILE: "/vault/secrets/gcp-key.json"
+
+      # If you rely on ADC, this can help libraries locate creds
       GOOGLE_APPLICATION_CREDENTIALS: /vault/secrets/gcp-key.json
     ports:
       - "8083:8083"

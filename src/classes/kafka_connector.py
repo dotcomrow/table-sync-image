@@ -8,18 +8,21 @@ import json
 import structlog
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, LoggingKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
+from classes.yugabyte_db_manager import YugabyteDBManager
 
 class KafkaConnector:
     def __init__(self, config):
         self.config = config
         self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
         self.logger = self._init_logger()
+        self.schema_registry_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.SCHEMA_REGISTRY_URL.value)
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
         self.host = db_cfg.get(YugabyteDBKeys.HOST.value, 'localhost')
         self.port = db_cfg.get(YugabyteDBKeys.PORT.value, 5433)
         self.user = db_cfg.get(YugabyteDBKeys.USER.value, 'yugabyte')
         self.password = db_cfg.get(YugabyteDBKeys.PASSWORD.value, 'yugabyte')
         self.database = db_cfg.get(YugabyteDBKeys.DATABASE.value, 'yugabyte')
+        self.yugabyte_manager = YugabyteDBManager(config)
         self.db_master_addresses = db_cfg.get(YugabyteDBKeys.MASTER_ADDRESSES.value, None)
         self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         
@@ -162,37 +165,83 @@ class KafkaConnector:
             self.logger.error("Exception while fetching Kafka connector status", error=str(e))
             return None
 
+    def _derive_topic_and_mappings(self, table_info: TableInfo):
+        """
+        Builds the Debezium topic name and BigQuery dataset/table mapping.
+        If table_info carries the parsed comment, use it; otherwise fall back.
+        """
+        # Debezium/YB topic uses: {server.name}.{schema}.{table}
+        server_name = f"yb_{table_info.database}_{table_info.schema}_{table_info.table}"
+        topic = f"{server_name}.{table_info.schema}.{table_info.table}"
+
+        # Parse dataset/table hint from COMMENT e.g. {"bootstrap":{"bq":"yugabyte_backup.testtable"}}
+        # If you already have parsed fields on TableInfo, replace this with those.
+        dataset = getattr(table_info.annotation, "bq_dataset", None)
+        table   = getattr(table_info.annotation, "bq_table", None)
+        if not (dataset and table):
+            # default fallback: put into a catch-all dataset and keep table name
+            dataset = getattr(self, "default_bq_dataset", "raw")
+            table   = table_info.table
+
+        return topic, dataset, table, server_name
+
+
     def create_source_connector(self, table_info: TableInfo):
         stream_id = self.get_cdc_stream_id(table_info)
+
+        # Build topic + server name consistently, so sink can subscribe correctly
+        topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
 
         source_config = {
             "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
             "tasks.max": "1",
+
             "database.hostname": self.host,
             "database.port": str(self.port),
-            "database.master.addresses": self.db_master_addresses,  # NEW
+            "database.master.addresses": self.db_master_addresses,
             "database.user": self.user,
             "database.password": self.password,
             "database.dbname": table_info.database,
-            "database.server.name": f"yb_{table_info.database}_{table_info.schema}_{table_info.table}",
-            "database.streamid": stream_id,                      # FIXED
+            "database.server.name": server_name,
+            "database.streamid": stream_id,
+
             "table.include.list": f"{table_info.schema}.{table_info.table}",
             "snapshot.mode": "initial",
+            "incremental.snapshot.enabled": "true",
+            "signal.data.collection": f"{table_info.schema}.debezium_signal",
+            "incremental.snapshot.chunk.size": "10000",   # optional
+
+            # Use the YB unwrap SMT (fine with Avro)
             "transforms": "unwrap",
             "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
             "transforms.unwrap.delete.handling.mode": "none",
+            "column.exclude.list": f"{table_info.schema}.{table_info.table}.id",
+
+            # Topic auto-creation hints (optional)
             "topic.creation.default.replication.factor": "1",
             "topic.creation.default.partitions": "1",
             "topic.creation.default.cleanup.policy": "delete",
+
+            # >>> IMPORTANT: Avro + Schema Registry <<<
+            "key.converter": "io.confluent.connect.avro.AvroConverter",
+            "value.converter": "io.confluent.connect.avro.AvroConverter",
+            "key.converter.schema.registry.url": self.schema_registry_url,
+            "value.converter.schema.registry.url": self.schema_registry_url,
+            # Let the source register schemas automatically
+            "key.converter.auto.register.schemas": "true",
+            "value.converter.auto.register.schemas": "true",
         }
 
         self.logger.debug("Source connector configuration", source_config=source_config)
         name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         response = self._send_connector_request(name, source_config)
         self.logger.info("Source connector created", response=response)
+        # Insert debezium signal record
+        self.yugabyte_manager.insert_debezium_signal(table_info)
+
 
     def create_sink_connector(self, table_info: TableInfo):
-        # Load the project ID from the GCP key file
+        # Load the project ID from the GCP key file (unchanged)
         keyfile_path = "/vault/secrets/gcp-key.json"
         try:
             with open(keyfile_path, "r") as keyfile:
@@ -204,20 +253,21 @@ class KafkaConnector:
             self.logger.error("Failed to load project_id from GCP key file", error=str(e))
             raise
 
-        topic = f"topic_{table_info.schema}_{table_info.table}"
+        # Derive topic/dataset/table consistently with the source
+        topic, dataset, table_name, _server_name = self._derive_topic_and_mappings(table_info)
 
         sink_config = {
             "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
             "tasks.max": "1",
 
-            # Topics
-            "topics": topic,                                    # e.g., "yb_db_schema_table"
-            "topic2TableMap": f"{topic}:{table_info.table}",          # e.g., "yb_db_schema_table:testtable"
-
-            # BigQuery target(s)
-            "project": bq_project,                              # Loaded from GCP key file
-            "defaultDataset": "raw",               # e.g., "raw"
-            "datasets": f"{topic}:{table_info.schema}",                   # e.g., "yb_db_schema_table:raw"
+            # Topics & explicit mappings
+            "topics": topic,
+            "topic2TableMap": f"{topic}:{table_name}",
+            "project": bq_project,
+            # Optional fallback for topics without explicit dataset mapping
+            "defaultDataset": dataset,
+            # Per-topic dataset (from your COMMENT "bq": "dataset.table")
+            "datasets": f"{topic}:{dataset}",
 
             # Auth
             "keySource": "FILE",
@@ -227,21 +277,21 @@ class KafkaConnector:
             "autoCreateTables": "true",
             "autoUpdateSchemas": "false",
             "allowNewBigQueryFields": "false",
-            "sanitizeTopics": "false",                          # ok since you map explicitly
+            "sanitizeTopics": "false",
             "sanitizeFieldNames": "false",
 
-            # Debezium-friendly upsert/delete
+            # Upsert/Delete (Debezium-friendly)
             "upsertEnabled": "true",
             "deleteEnabled": "true",
-            "primaryKeyMode": "record_key",                     # REQUIRED when upsertEnabled=true
-            "kafkaKeyFieldName": "id",  
-            # (No primaryKeyFields needed for record_key mode)
+            # BigQuery sink needs the name of the Kafka KEY field to match on:
+            "kafkaKeyFieldName": "id",
+            # Note: primaryKeyMode is not used by this sink; matching is via the Kafka key
 
-            # Converters (must carry schemas for BQ sink)
-            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "key.converter.schemas.enable": "true",
-            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "value.converter.schemas.enable": "true",
+            # >>> IMPORTANT: Avro + Schema Registry to enable autoCreateTables <<<
+            "key.converter": "io.confluent.connect.avro.AvroConverter",
+            "value.converter": "io.confluent.connect.avro.AvroConverter",
+            "key.converter.schema.registry.url": self.schema_registry_url,
+            "value.converter.schema.registry.url": self.schema_registry_url,
 
             # Consumer start position for new sink
             "consumer.override.auto.offset.reset": "earliest",
@@ -250,7 +300,7 @@ class KafkaConnector:
             "enableRetries": "true",
             "bigQueryRetry": "6",
             "bigQueryRetryWait": "2000",
-            "mergeIntervalMs": "60000"
+            "mergeIntervalMs": "60000",
         }
 
         name = f"bq-sink-{table_info.database}-{table_info.table}"
