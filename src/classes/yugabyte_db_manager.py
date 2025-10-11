@@ -44,18 +44,21 @@ class YugabyteDBManager:
             self.logger.info("Mock connect called")
             from unittest.mock import MagicMock
             return MagicMock()
-        
-        """Establish a connection to the YugabyteDB database."""
-        self.logger.info("Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=database)
+
+        database_to_connect = database or self.database
+        self.logger.info("Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=database_to_connect)
         try:
             connection = psycopg2.connect(
                 host=self.host,
                 port=self.port,
                 user=self.user,
                 password=self.password,
-                database=self.database
+                database=database_to_connect
             )
-            self.logger.info("Connection to YugabyteDB established successfully")
+            with connection.cursor() as cur:
+                cur.execute("SELECT current_database();")
+                current_db = cur.fetchone()[0]
+                self.logger.info("Connected to database", current_database=current_db)
             return connection
         except Exception as e:
             self.logger.error("Failed to connect to YugabyteDB", error=str(e))
