@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import sys
 from typing import Optional
 import json
-from classes.config_reader import ConfigReader, BigQueryKeys
 
 @dataclass
 class TableAnnotation:

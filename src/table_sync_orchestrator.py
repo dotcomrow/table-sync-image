@@ -37,7 +37,6 @@ import requests
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
 from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, HealthCheckKeys, MetricsKeys
-from classes.cdc_manager import CDCManager
 from classes.yugabyte_db_manager import YugabyteDBManager
 
 HAVE_KAFKA = True
@@ -51,7 +50,6 @@ class TableSyncOrchestrator:
         self.yugabyte_manager = YugabyteDBManager(self.config)
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
-        self.cdc_manager = CDCManager(self.config)
         self.running = False
         self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()

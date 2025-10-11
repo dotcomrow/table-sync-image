@@ -8,7 +8,7 @@ import json
 import structlog
 from psycopg2.extras import RealDictCursor
 from classes.config_reader import ConfigKeys, LoggingKeys, YugabyteDBKeys
-from classes.table_info import TableInfo  # <-- Add this import
+from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
 
 class YugabyteDBManager:
