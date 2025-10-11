@@ -97,6 +97,16 @@ class YugabyteDBManager:
         excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
         return self.discover_databases(excluded)
 
+    def discover_databases(self, excluded: List[str] = None) -> List[str]:
+        """Discover databases in YugabyteDB."""
+        excluded = excluded or ['postgres', 'template0', 'template1']
+        query = "SELECT datname FROM pg_database WHERE datistemplate = false;"
+        self.logger.info("Discovering databases", excluded=excluded)
+        all_databases = [row[0] for row in self.run_query(query)]
+        databases = [db for db in all_databases if db not in excluded]
+        self.logger.info("Databases discovered", databases=databases)
+        return databases
+    
     def _discover_tables(self, database: str) -> List[TableInfo]:
         out: List[TableInfo] = []
         try:
@@ -161,55 +171,6 @@ class YugabyteDBManager:
         self.run_query(query)
         self.logger.info("Schema deleted successfully", schema_name=schema_name)
 
-    def get_system_db_connection(self):
-        """Establish a connection to a system database."""
-        system_dbs = ['postgres', 'yugabyte', 'template1']
-        for sys_db in system_dbs:
-            try:
-                self.logger.info("Connecting to system database", database=sys_db)
-                conn = self.connect()
-                conn.set_isolation_level(0)  # Autocommit mode
-                self.logger.info("Connection to system database established", database=sys_db)
-                return conn
-            except Exception as e:
-                self.logger.warning("Failed to connect to system database", database=sys_db, error=str(e))
-                continue
-        self.logger.error("Could not connect to any system database")
-        raise RuntimeError("Could not connect to any system database")
-
-    def discover_databases(self, excluded: List[str] = None) -> List[str]:
-        """Discover databases in YugabyteDB."""
-        excluded = excluded or ['postgres', 'template0', 'template1']
-        query = "SELECT datname FROM pg_database WHERE datistemplate = false;"
-        self.logger.info("Discovering databases", excluded=excluded)
-        all_databases = [row[0] for row in self.run_query(query)]
-        databases = [db for db in all_databases if db not in excluded]
-        self.logger.info("Databases discovered", databases=databases)
-        return databases
-
-    def reconcile_table(self, table_info):
-        """Reconcile a table's schema and data."""
-        # Placeholder for reconciliation logic
-        pass
-
-    def get_table_schema(self, table_info: TableInfo):
-        """Fetch the schema of a table from YugabyteDB."""
-        schema_name = table_info.schema  # <-- Extract schema_name
-        table_name = table_info.table    # <-- Extract table_name
-        query = f"""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = %s AND table_name = %s;
-        """
-        self.logger.info("Fetching table schema", schema_name=schema_name, table_name=table_name)
-        try:
-            result = self.run_query(query, [schema_name, table_name])
-            self.logger.info("Table schema fetched successfully", schema_name=schema_name, table_name=table_name, schema=result)
-            return result
-        except Exception as e:
-            self.logger.error("Failed to fetch schema for table", schema_name=schema_name, table_name=table_name, error=str(e))
-            raise RuntimeError(f"Failed to fetch schema for table {schema_name}.{table_name}: {e}")
-        
     def create_stream(self, database_name: str) -> str:
         """Create a CDC stream for a given database using yb-admin."""
         self.logger.info("Creating CDC stream", database_name=database_name)
