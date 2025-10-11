@@ -102,7 +102,7 @@ class YugabyteDBManager:
         out: List[TableInfo] = []
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
+                sql_query = """
                     SELECT t.table_schema,
                            t.table_name,
                            obj_description(c.oid) AS table_comment
@@ -113,8 +113,12 @@ class YugabyteDBManager:
                       AND t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
                       AND t.table_catalog = %s
                     ORDER BY t.table_schema, t.table_name
-                """, (database,))
-                for row in cur.fetchall():
+                """
+                self.logger.debug("Executing SQL query", query=sql_query, params=(database,))
+                cur.execute(sql_query, (database,))
+                rows = cur.fetchall()
+                self.logger.debug("SQL query executed successfully", row_count=len(rows), rows=rows)
+                for row in rows:
                     ann = TableAnnotation.from_comment(row['table_comment']) if row['table_comment'] else None
                     out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
         except Exception as e:

@@ -24,15 +24,13 @@ Highlights:
 import sys
 import threading
 import time
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Optional, Any
+from typing import Dict, Any
 from datetime import datetime
 
 import structlog
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from flask import Flask, jsonify
-import requests
 
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
@@ -91,76 +89,6 @@ class TableSyncOrchestrator:
             'connectors_running': Gauge('sync_connectors_running', 'Number of connectors with all tasks RUNNING'),
             'last_scan_time': Gauge('sync_last_scan_timestamp', 'Timestamp of last scan'),
         }
-
-    # ----------------------------- HTTP logging helpers -----------------------------
-
-    def _log_http_bodies_on_failure(self) -> bool:
-        return bool((self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(LoggingKeys.LOG_BODIES_ON_FAILURE.value, True))
-
-    def _redact(self, data: Any, redact_keys: Optional[set] = None) -> Any:
-        DEFAULT = {
-            "password", "pass", "pwd", "secret", "token", "bearer", "authorization",
-            "api_key", "apikey", "sslkey", "sslpassword", "database.tls.key.password",
-            "sasl.jaas.config", "sasl.password", "sasl.mechanism",
-        }
-        keys = set(DEFAULT)
-        cfg = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING_REDACT_KEYS.value, [])
-        if isinstance(cfg, list):
-            keys |= {str(k).lower() for k in cfg}
-
-        def _sanitize(obj):
-            if isinstance(obj, dict):
-                out = {}
-                for k, v in obj.items():
-                    kl = str(k).lower()
-                    if kl in keys or any(kl.endswith("." + rk) for rk in keys):
-                        out[k] = "****"
-                    else:
-                        out[k] = _sanitize(v)
-                return out
-            elif isinstance(obj, list):
-                return [_sanitize(x) for x in obj]
-            else:
-                return obj
-
-        return _sanitize(data)
-
-    def _log_http_failure(
-        self,
-        *,
-        method: str,
-        url: str,
-        req_json: Optional[dict] = None,
-        resp: Optional[requests.Response] = None,
-        error: Optional[Exception] = None,
-        note: Optional[str] = None,
-    ):
-        fields = {"method": method, "url": url}
-        if resp is not None:
-            body = resp.text or ""
-            if len(body) > 8192:
-                body = body[:8192] + "...(truncated)"
-            fields.update({
-                "status": resp.status_code,
-                "response_text": body,
-                "response_headers": dict(resp.headers or {}),
-            })
-        if error is not None:
-            fields["error"] = str(error)
-        if note:
-            fields["note"] = note
-
-        if self._log_http_bodies_on_failure() and req_json is not None:
-            try:
-                redacted = self._redact(req_json)
-                pretty = json.dumps(redacted, ensure_ascii=False, indent=2)
-                if len(pretty) > 8192:
-                    pretty = pretty[:8192] + "...(truncated)"
-                fields["request_json"] = pretty
-            except Exception as e:
-                fields["request_json_error"] = f"failed to serialize: {e}"
-
-        self.logger.error("HTTP request failed", **fields)
 
     # ----------------------------- Health & Metrics Servers -----------------------------
 
