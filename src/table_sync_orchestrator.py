@@ -208,90 +208,91 @@ class TableSyncOrchestrator:
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
-    def _table_sync_loop(self):
-        self.logger.info("Starting table sync loop")
-        try:
-            while self.running:
-                start = time.time()
-                self.logger.info("Beginning processing")
-                try:
-                    # Discover databases and create connectors as needed
-                    databases = self.yugabyte_manager._discover_databases()
-                    self.logger.info("Databases discovered", databases=databases)
+    def _table_sync_loop(self, db):
+        tables = self.yugabyte_manager._discover_tables(db)
+        self.logger.info("Tables discovered", database=db, tables=[t.table for t in tables])
 
-                    for db in databases:
-                        tables = self.yugabyte_manager._discover_tables(db)
-                        self.logger.info("Tables discovered", database=db, tables=[t.table for t in tables])
-
-                        for table_info in tables:
-                            # for each table in the database check if it has annotation enabled
-                            if table_info.annotation is not None and table_info.annotation.enabled:
-                                # Check to see if table has entry in debezium signal table
-                                if not self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                                    # Table does not have entry in debezium signal table
-                                    # Means this is a newly annotated table so we check to see if connectors exist as they may be in a bad state
-                                    connector_statuses = self.kafka_connector.check_connector_exists(table_info)
-                                    if not connector_statuses['source'] or not connector_statuses['sink']:
-                                        try:
-                                            self.kafka_connector.setup_connectors(table_info)
-                                        except Exception as e:
-                                            self.logger.error("Error setting up connectors", table=table_info.table, error=str(e))
-                                    else:
-                                        self.logger.info("Connectors already exist for table, resetting and rebuilding", table=table_info.table)
-                                        try:
-                                            self.kafka_connector.reset_connectors(table_info)
-                                            self.kafka_connector.setup_connectors(table_info)
-                                        except Exception as e:
-                                            self.logger.error("Error resetting connectors", table=table_info.table, error=str(e))
-                                else:
-                                    self.logger.info("Table already has entry in debezium signal table, check if connectors are running", table=table_info.table)
-                                    connector_statuses = self.kafka_connector.check_connector_exists(table_info)
-                                    if not connector_statuses['source'] or not connector_statuses['sink']:
-                                        self.logger.info("One or more connectors do not exist, setting up connectors", table=table_info.table)
-                                        try:
-                                            self.kafka_connector.reset_connectors(table_info)
-                                            self.kafka_connector.setup_connectors(table_info)
-                                        except Exception as e:
-                                            self.logger.error("Error setting up connectors", table=table_info.table, error=str(e))
+        for table_info in tables:
+            # for each table in the database check if it has annotation enabled
+            if table_info.annotation is not None and table_info.annotation.enabled:
+                # Check to see if table has entry in debezium signal table
+                if not self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                    # Table does not have entry in debezium signal table
+                    # Means this is a newly annotated table so we check to see if connectors exist as they may be in a bad state
+                    connector_statuses = self.kafka_connector.check_connector_exists(table_info)
+                    if not connector_statuses['source'] or not connector_statuses['sink']:
+                        try:
+                            self.kafka_connector.setup_connectors(table_info)
+                        except Exception as e:
+                            self.logger.error("Error setting up connectors", table=table_info.table, error=str(e))
+                    else:
+                        self.logger.info("Connectors already exist for table, resetting and rebuilding", table=table_info.table)
+                        try:
+                            self.kafka_connector.reset_connectors(table_info)
+                            self.kafka_connector.setup_connectors(table_info)
+                        except Exception as e:
+                            self.logger.error("Error resetting connectors", table=table_info.table, error=str(e))
+                else:
+                    self.logger.info("Table already has entry in debezium signal table, check if connectors are running", table=table_info.table)
+                    connector_statuses = self.kafka_connector.check_connector_exists(table_info)
+                    if not connector_statuses['source'] or not connector_statuses['sink']:
+                        self.logger.info("One or more connectors do not exist, setting up connectors", table=table_info.table)
+                        try:
+                            self.kafka_connector.reset_connectors(table_info)
+                            self.kafka_connector.setup_connectors(table_info)
+                        except Exception as e:
+                            self.logger.error("Error setting up connectors", table=table_info.table, error=str(e))
                     
-                        # For tables in the database check entries in the signal table for tables in database
-                        # Fetch all signal table entries for database and verify that annotation is still enabled for each
-                        for table in self.yugabyte_manager.fetch_tables_in_debezium_signal(db):
-                            table_info = next((t for t in tables if t.table == table), None)
-                            if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
-                                self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
-                                try:
-                                    self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
-                                    self.kafka_connector.reset_connectors(table_info)
-                                    self.bigquery_manager.delete_table(table_info)
-                                except Exception as e:
-                                    self.logger.error("Error tearing down connectors", table=table, error=str(e))
-                                    
+        # For tables in the database check entries in the signal table for tables in database
+        # Fetch all signal table entries for database and verify that annotation is still enabled for each
+        for table in self.yugabyte_manager.fetch_tables_in_debezium_signal(db):
+            table_info = next((t for t in tables if t.table == table), None)
+            if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
+                self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
+                try:
+                    self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+                    self.kafka_connector.reset_connectors(table_info)
+                    self.bigquery_manager.delete_table(table_info)
                 except Exception as e:
-                    self.logger.error("Error during table sync", error=str(e))
-                finally:
-                    elapsed = time.time() - start
-                    self.logger.info("Scan loop complete", elapsed_time=elapsed)
-                    time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value, 10) - elapsed))
-        except Exception as e:
-            self.logger.error("Unexpected error in table sync loop", error=str(e))
-        finally:
-            self.logger.info("Table sync loop exiting")
+                    self.logger.error("Error tearing down connectors", table=table, error=str(e))
+                                    
+
 
     def start(self):
         self.logger.info("Starting orchestrator")
         self.running = True
         self.logger.info("Starting processing loop")
         try:
-            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
-                futures = {executor.submit(self._table_sync_loop)}
-
-                for future in as_completed(futures):
-                    ti = futures[future]
+            self.logger.info("Starting table sync loop")
+            try:
+                while self.running:
+                    start = time.time()
+                    self.logger.info("Beginning processing")
                     try:
-                        future.result()
+                        # Discover databases and create connectors as needed
+                        databases = self.yugabyte_manager._discover_databases()
+                        self.logger.info("Databases discovered", databases=databases)
+                    
+                        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                            futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
+
+                            for future in as_completed(futures):
+                                ti = futures[future]
+                                try:
+                                    future.result()
+                                except Exception as e:
+                                    self.logger.error("Error in table sync loop", table=ti.table_info.table, error=str(e))
+                        
                     except Exception as e:
-                        self.logger.error("Error in table sync loop", table=ti.table_info.table, error=str(e))
+                        self.logger.error("Error during table sync", error=str(e))
+                    finally:
+                        elapsed = time.time() - start
+                        self.logger.info("Scan loop complete", elapsed_time=elapsed)
+                        time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value, 10) - elapsed))
+            except Exception as e:
+                self.logger.error("Unexpected error in table sync loop", error=str(e))
+            finally:
+                self.logger.info("Table sync loop exiting")
                             
         except Exception as e:
             self.logger.error("Unexpected error in orchestrator", error=str(e))
