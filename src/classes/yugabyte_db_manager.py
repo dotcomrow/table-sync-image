@@ -25,7 +25,7 @@ class YugabyteDBManager:
         
     def _init_logger(self) -> structlog.BoundLogger:
         import logging
-        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(ConfigKeys.LOGGING.value, {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
+        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
         numeric = getattr(logging, lvl, logging.INFO)
         structlog.configure(
             processors=[
