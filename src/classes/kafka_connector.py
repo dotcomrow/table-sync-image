@@ -160,47 +160,6 @@ class KafkaConnector:
             self.logger.error("Exception while checking connector existence", error=str(e))
 
         return {"source_exists": source_exists, "sink_exists": sink_exists}
-
-    def _kc_restart_connector(self, name: str) -> bool:
-        self.logger.info("Restarting Kafka connector", name=name)
-        kc = self._kc_url()
-        if not kc:
-            self.logger.error("Kafka Connect URL not configured")
-            return False
-        url = f"{kc}/connectors/{name}/restart"
-        self.logger.debug("Kafka Connect restart URL", url=url)
-        try:
-            resp = requests.post(url, timeout=10)
-            self.logger.debug("Kafka Connect restart response", status_code=resp.status_code, response_text=resp.text)
-            if resp.status_code == 204:
-                self.logger.info("Kafka connector restarted successfully", name=name)
-                return True
-            self.logger.error("Failed to restart Kafka connector", status_code=resp.status_code, response_text=resp.text)
-            return False
-        except Exception as e:
-            self.logger.error("Exception during Kafka connector restart", error=str(e))
-            return False
-
-    def _kc_connector_status(self, name: str) -> Optional[dict]:
-        self.logger.info("Fetching Kafka connector status", name=name)
-        kc = self._kc_url()
-        if not kc:
-            self.logger.error("Kafka Connect URL not configured")
-            return None
-        url = f"{kc}/connectors/{name}/status"
-        self.logger.debug("Kafka Connect status URL", url=url)
-        try:
-            resp = requests.get(url, timeout=10)
-            self.logger.debug("Kafka Connect status response", status_code=resp.status_code, response_text=resp.text)
-            if resp.status_code == 200:
-                status = resp.json()
-                self.logger.info("Kafka connector status fetched successfully", status=status)
-                return status
-            self.logger.error("Failed to fetch Kafka connector status", status_code=resp.status_code, response_text=resp.text)
-            return None
-        except Exception as e:
-            self.logger.error("Exception while fetching Kafka connector status", error=str(e))
-            return None
         
     def reset_connectors(self, table_info: TableInfo):
         self.logger.info("Resetting Kafka connectors for table", table=table_info.full_name)
