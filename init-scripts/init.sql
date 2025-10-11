@@ -20,3 +20,17 @@ COMMENT ON TABLE public.testtable IS
 
 INSERT INTO public.testtable (name) VALUES ('Sample Name 1'), ('Sample Name 2');
 INSERT INTO public.testtable (name) VALUES ('Sample Name 3'), ('Sample Name 4');
+
+CREATE SCHEMA IF NOT EXISTS test_schema;
+
+CREATE TABLE test_schema.testtable (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+INSERT INTO test_schema.testtable (name) VALUES ('Sample Name 1'), ('Sample Name 2');
+INSERT INTO test_schema.testtable (name) VALUES ('Sample Name 3'), ('Sample Name 4');
+
+COMMENT ON TABLE test_schema.testtable IS
+'{"bootstrap":{"enabled":true, "bq": "test_schema.testtable"}}';
