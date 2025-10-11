@@ -58,7 +58,6 @@ class TableSyncOrchestrator:
         self.mock_enabled = self.config.get(ConfigKeys.MOCK.value, False)
 
         self.yugabyte_manager.create_debezium_signal_table()
-        self._init_status_table()
         import os
         if start_servers:
             if not os.getenv('DISABLE_HEALTH'):
