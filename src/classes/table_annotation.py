@@ -9,13 +9,6 @@ class TableAnnotation:
     enabled: bool
     bq_dataset: Optional[str] = None  # extracted from bq_target
     bq_table: Optional[str] = None    # extracted from bq_target
-    cdc_stream_id: Optional[str] = None  # optional per-table override
-    default_backup_dataset: Optional[str] = None  # optional default backup dataset
-
-    def __post_init__(self):
-        # Initialize default_backup_dataset using the config
-        if not self.default_backup_dataset:
-            self.default_backup_dataset = self.config.get(BigQueryKeys.DEFAULT_BACKUP_DATASET.value, "yugabyte_backup")
 
     @classmethod
     def from_comment(cls, config: ConfigReader, comment: str) -> Optional["TableAnnotation"]:
@@ -28,8 +21,6 @@ class TableAnnotation:
                 enabled=bool(bootstrap.get("enabled", False)),
                 bq_dataset=str(bootstrap.get("bq", "")).strip().split(".")[0],
                 bq_table=str(bootstrap.get("bq", "")).strip().split(".")[1] if "." in str(bootstrap.get("bq", "")).strip() else None,
-                cdc_stream_id=(bootstrap.get("cdc_stream_id") or None),
-                default_backup_dataset=config.get(BigQueryKeys.DEFAULT_BACKUP_DATASET.value, "yugabyte_backup"),
             )
         except Exception as e:
             print(f"Unexpected error in annotation reader: {e}", file=sys.stderr)
