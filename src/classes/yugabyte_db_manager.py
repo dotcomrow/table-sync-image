@@ -222,3 +222,59 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
             raise RuntimeError(f"Failed to insert record into debezium_signal table: {e}")
+
+    def create_debezium_signal_table(self):
+        """Create the debezium_signal table if it does not exist."""
+        query = """
+        CREATE TABLE IF NOT EXISTS public.debezium_signal (
+            id   text PRIMARY KEY,
+            type text NOT NULL,
+            data jsonb,
+            table_database text
+        );
+        """
+        self.logger.info("Creating debezium_signal table if not exists")
+        self.run_query(query)
+        self.logger.info("debezium_signal table created or already exists")
+
+    def entry_exists_in_debezium_signal(self, table_info: TableInfo) -> bool:
+        """Check if an entry exists in the debezium_signal table for the given TableInfo."""
+        table_id = f'snap_{table_info.schema}_{table_info.table}'
+        query = """
+        SELECT EXISTS (
+            SELECT 1 FROM public.debezium_signal
+            WHERE id = {table_id}
+        );
+        """
+        self.logger.info("Checking if entry exists in debezium_signal table", id=table_id)
+        result = self.run_query(query)
+        exists = result[0][0] if result else False
+        self.logger.info("Entry existence check in debezium_signal table completed", exists=exists)
+        return exists
+    
+    def fetch_tables_in_debezium_signal(self, database: str) -> list:
+        """Fetch all table entries in the public.debezium_signal table using the given database."""
+        query = """
+        SELECT DISTINCT data->>'data-collections' AS table_name
+        FROM public.debezium_signal
+        WHERE table_database = %s;
+        """
+        self.logger.info("Fetching table entries from debezium_signal table", database=database)
+        result = self.run_query(query, [database])
+        self.logger.info("Table entries fetched from debezium_signal table", count=len(result))
+        return result
+    
+    def remove_entry_from_debezium_signal(self, database: str, table: str):
+        """Remove an entry from the debezium_signal table."""
+        query = """
+        DELETE FROM public.debezium_signal
+        WHERE table_database = %s AND data->>'data-collections' = %s;
+        """
+        table_identifier = f"{database}.{table}"
+        self.logger.info("Removing entry from debezium_signal table", database=database, table=table)
+        try:
+            self.run_query(query, [database, table_identifier])
+            self.logger.info("Entry removed successfully from debezium_signal table", database=database, table=table)
+        except Exception as e:
+            self.logger.error("Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
+            raise

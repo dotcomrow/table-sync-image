@@ -11,8 +11,10 @@ class TableAnnotation:
     bq_table: Optional[str] = None    # extracted from bq_target
 
     @classmethod
-    def from_comment(cls, config: ConfigReader, comment: str) -> Optional["TableAnnotation"]:
+    def from_comment(cls, comment: str) -> Optional["TableAnnotation"]:
         try:
+            if not comment or not comment.strip():
+                return None
             data = json.loads(comment)
             bootstrap = data.get("bootstrap", {})
             if not isinstance(bootstrap, dict):

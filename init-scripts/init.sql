@@ -11,7 +11,8 @@ CREATE TABLE public.testtable (
 CREATE TABLE IF NOT EXISTS public.debezium_signal (
   id   text PRIMARY KEY,
   type text NOT NULL,
-  data jsonb
+  data jsonb,
+  table_database text
 );
 
 COMMENT ON TABLE public.testtable IS
