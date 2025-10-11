@@ -3,7 +3,7 @@ import os
 import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../sample')))
-from classes.config_reader import ConfigReader, ConfigKeys, YugabyteDBKeys
+from classes.config_reader import ConfigReader
 from classes.yugabyte_db_manager import YugabyteDBManager
 from classes.table_info import TableInfo
 
@@ -14,12 +14,12 @@ class TestYugabyteDBManager(unittest.TestCase):
         self.manager = YugabyteDBManager(self.config)
 
     def test_insert_debezium_signal(self):
-        table_info = TableInfo(database="test_db", schema="public", table="test_table", annotation=None)
+        table_info = TableInfo(database="testdb", schema="public", table="test_table", annotation=None)
         self.manager.insert_debezium_signal(table_info)
         # Add assertions or mock checks here
         
     def test_discover_tables(self):
-        tables = self.manager._discover_tables("test_db")
+        tables = self.manager._discover_tables("testdb")
         self.assertIsInstance(tables, list)
         # Add more specific assertions based on expected tables
         
