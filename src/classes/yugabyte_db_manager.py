@@ -108,6 +108,7 @@ class YugabyteDBManager:
         return databases
     
     def _discover_tables(self, database: str) -> List[TableInfo]:
+        """Discover all tables in all schemas of the specified database."""
         out: List[TableInfo] = []
         try:
             with self.connect() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -119,9 +120,10 @@ class YugabyteDBManager:
                     JOIN pg_class c       ON c.relname = t.table_name
                     JOIN pg_namespace n   ON n.oid = c.relnamespace AND n.nspname = t.table_schema
                     WHERE t.table_type = 'BASE TABLE'
-                      AND t.table_schema NOT IN ('information_schema','pg_catalog','pg_toast')
+                      AND t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                      AND t.table_catalog = %s
                     ORDER BY t.table_schema, t.table_name
-                """)
+                """, (database,))
                 for row in cur.fetchall():
                     ann = TableAnnotation.from_comment(self.config, row['table_comment']) if row['table_comment'] else None
                     out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
