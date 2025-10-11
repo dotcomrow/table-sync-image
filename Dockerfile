@@ -6,10 +6,6 @@ ARG BUILD_TIMESTAMP
 ARG GIT_COMMIT
 ARG GIT_TAG
 
-# For macOS builds (e.g., Apple M1/M2), set YB_OS to "darwin" to fetch the appropriate binary
-# ONLY SET FOR TESTING ON MACOS HOSTS - DO NOT USE IN PRODUCTION
-ARG YB_OS="darwin" 
-
 # --- Env ---
 ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP} \
     GIT_COMMIT=${GIT_COMMIT} \
