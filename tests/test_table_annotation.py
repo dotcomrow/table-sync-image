@@ -25,7 +25,7 @@ class TestTableAnnotation(unittest.TestCase):
             }
         })
 
-        annotation = TableAnnotation.from_comment(self.config, comment)
+        annotation = TableAnnotation.from_comment(comment)
 
         self.assertIsNotNone(annotation)
         self.assertTrue(annotation.enabled)

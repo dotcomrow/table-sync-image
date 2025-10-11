@@ -13,7 +13,7 @@ class TestTableInfo(unittest.TestCase):
             database="db",
             schema="schema",
             table="table",
-            annotation=TableAnnotation.from_comment(ConfigReader(config_path).load_config(), "{\"bootstrap\":{\"enabled\":true, \"bq\": \"yugabyte_backup.mcp_openapi_augmentations\"}}")
+            annotation=TableAnnotation.from_comment("{\"bootstrap\":{\"enabled\":true, \"bq\": \"yugabyte_backup.mcp_openapi_augmentations\"}}")
         )
 
     def test_example(self):

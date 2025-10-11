@@ -23,7 +23,7 @@ class TestKafkaConnector(unittest.TestCase):
             database="testdb",
             schema="public",
             table="testtable",
-            annotation=TableAnnotation.from_comment(self.config, '{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
+            annotation=TableAnnotation.from_comment('{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
         )
 
     def test_basic_setup(self):
