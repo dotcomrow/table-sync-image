@@ -21,23 +21,14 @@ Highlights:
 - Logs failed HTTP requests to Kafka Connect with redacted payloads and truncated bodies
 """
 
-import os
 import sys
-import signal
 import threading
 import time
 import json
-import subprocess
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, Optional, Any
 from datetime import datetime
-from contextlib import contextmanager
 
-import yaml
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from google.cloud import bigquery
 import structlog
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from flask import Flask, jsonify
@@ -45,13 +36,9 @@ import requests
 
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
-from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, BigQueryKeys, HealthCheckKeys, MetricsKeys, KafkaConnectKeys
+from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, HealthCheckKeys, MetricsKeys
 from classes.cdc_manager import CDCManager
-from classes.table_info import TableInfo
-from classes.sync_status import SyncStatus
 from classes.yugabyte_db_manager import YugabyteDBManager
-from classes.table_info import TableAnnotation
-
 
 HAVE_KAFKA = True
 
@@ -66,16 +53,11 @@ class TableSyncOrchestrator:
         self.bigquery_manager = BigQueryManager(self.config)
         self.cdc_manager = CDCManager(self.config)
         self.running = False
-        self.db_connections: Dict[str, psycopg2.extensions.connection] = {}
-        self.bigquery_client: Optional[bigquery.Client] = None
         self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()
-        self.status_table: Dict[str, SyncStatus] = {}
         self.mock_enabled = self.config.get(ConfigKeys.MOCK.value, False)
 
         self.yugabyte_manager.create_debezium_signal_table()
-        self._derive_project_id()
-        self._init_bigquery_client()
         self._init_status_table()
         import os
         if start_servers:
@@ -183,24 +165,6 @@ class TableSyncOrchestrator:
 
         self.logger.error("HTTP request failed", **fields)
 
-    # ----------------------------- External Clients -----------------------------
-
-    def _init_bigquery_client(self):
-        try:
-            credentials_path = self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.CREDENTIALS_PATH.value, "/vault/secrets/gcp-key.json")
-            project_id = self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.PROJECT_ID.value, None)
-            if credentials_path and os.path.exists(credentials_path) and project_id:
-                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-                self.bigquery_client = bigquery.Client(project=project_id)
-                self.logger.info("BigQuery client initialized", project_id=project_id)
-            else:
-                self.bigquery_client = None
-                self.logger.warning("BigQuery disabled (missing credentials or project_id)",
-                                    credentials_path=credentials_path, project_id=project_id)
-        except Exception as e:
-            self.logger.error("Failed to initialize BigQuery client", error=str(e))
-            self.bigquery_client = None
-
     # ----------------------------- Health & Metrics Servers -----------------------------
 
     def _start_health_server(self):
@@ -218,19 +182,19 @@ class TableSyncOrchestrator:
         def status():
             # Summarize status table
             out = []
-            for k, v in self.status_table.items():
-                out.append({
-                    "table": v.table_info.full_name,
-                    "annotation_enabled": v.annotation_enabled,
-                    "bigquery_exists": v.bigquery_exists,
-                    "connector_exists": v.connector_exists,
-                    "sync_active": v.sync_active,
-                    "last_connector_state": v.last_connector_state,
-                    "expected_topic": v.expected_topic,
-                    "topic_exists": v.topic_exists,
-                    "last_error": v.last_error,
-                    "last_scan": v.last_scan.isoformat(),
-                })
+            # for k, v in self.status_table.items():
+            #     out.append({
+            #         "table": v.table_info.full_name,
+            #         "annotation_enabled": v.annotation_enabled,
+            #         "bigquery_exists": v.bigquery_exists,
+            #         "connector_exists": v.connector_exists,
+            #         "sync_active": v.sync_active,
+            #         "last_connector_state": v.last_connector_state,
+            #         "expected_topic": v.expected_topic,
+            #         "topic_exists": v.topic_exists,
+            #         "last_error": v.last_error,
+            #         "last_scan": v.last_scan.isoformat(),
+            #     })
             return jsonify({"tables": out, "ts": datetime.utcnow().isoformat()})
 
         def run_server():
@@ -245,250 +209,21 @@ class TableSyncOrchestrator:
         start_http_server(port)
         self.logger.info("Metrics server started", port=port)
 
-    # ----------------------------- Status -----------------------------
-
-    def _init_status_table(self):
-        self.status_table = {}
-        self.logger.info("Status table initialized")
-
-    # ----------------------------- Postgres helpers -----------------------------
-
-    _PG_ALLOWED_KEYS = {
-        'host', 'hostaddr', 'port', 'dbname', 'database', 'user', 'password',
-        'connect_timeout', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl',
-        'options', 'application_name', 'keepalives', 'keepalives_idle',
-        'keepalives_interval', 'keepalives_count',
-    }
-
-    def _pg_conn_kwargs(self, base: Dict[str, Any], database: Optional[str] = None) -> Dict[str, Any]:
-        yb = dict(base or {})
-        if database:
-            yb['database'] = database
-        if 'database' in yb:
-            yb['dbname'] = yb['database']
-            del yb['database']
-
-        yb.setdefault('connect_timeout', 5)
-        yb.setdefault('application_name', 'table-sync-orchestrator')
-        yb.setdefault('keepalives', 1)
-        yb.setdefault('keepalives_idle', 30)
-        yb.setdefault('keepalives_interval', 10)
-        yb.setdefault('keepalives_count', 5)
-
-        filtered = {k: v for k, v in yb.items() if k in self._PG_ALLOWED_KEYS}
-        return filtered
-
-    def _get_system_db_connection(self):
-        return self.yugabyte_manager.get_system_db_connection()
-
-    def _get_db_connection_ctx(self, database: str):
-        @contextmanager
-        def get_connection():
-            base_cfg = self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}
-            kwargs = self._pg_conn_kwargs(base_cfg, database=database)
-            safe_log = {k: ('****' if k == 'password' else v) for k, v in kwargs.items()}
-            self.logger.debug("Attempting database connection", database=database, config=safe_log)
-            conn = None
-            try:
-                conn = psycopg2.connect(**kwargs)
-                self.logger.info("Database connection established", database=database, user=kwargs.get('user'))
-                yield conn
-            except Exception as e:
-                self.logger.error("Failed to connect to database", database=database, error=str(e))
-                raise
-            finally:
-                if conn:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-        return get_connection()
-
-    # ----------------------------- Discovery -----------------------------
-
-    def _filter_excluded_databases(self, all_databases: List[str]) -> List[str]:
-        ex_cfg = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, 'postgres,template0,template1')
-        excluded = [d.strip() for d in ex_cfg.split(',')] if isinstance(ex_cfg, str) else (ex_cfg or [])
-        kept = [d for d in all_databases if d not in excluded]
-        self.logger.debug("Database filtering applied",
-                          total_databases=len(all_databases),
-                          excluded_databases=excluded,
-                          remaining_databases=len(kept))
-        return kept
-
-    def _discover_databases(self) -> List[str]:
-        excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
-        return self.yugabyte_manager.discover_databases(excluded)
-
-    def _discover_tables(self, database: str) -> List[TableInfo]:
-        out: List[TableInfo] = []
-        try:
-            with self._get_db_connection_ctx(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT t.table_schema,
-                           t.table_name,
-                           obj_description(c.oid) AS table_comment
-                    FROM information_schema.tables t
-                    JOIN pg_class c       ON c.relname = t.table_name
-                    JOIN pg_namespace n   ON n.oid = c.relnamespace AND n.nspname = t.table_schema
-                    WHERE t.table_type = 'BASE TABLE'
-                      AND t.table_schema NOT IN ('information_schema','pg_catalog','pg_toast')
-                    ORDER BY t.table_schema, t.table_name
-                """)
-                for row in cur.fetchall():
-                    ann = TableAnnotation.from_comment(self.config, row['table_comment']) if row['table_comment'] else None
-                    out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
-        except Exception as e:
-            self.logger.error("Failed to discover tables", database=database, error=str(e))
-        return out
-
-    # ----------------------------- Reconciliation -----------------------------
-
-    def _reconcile_connector(self, table_info: TableInfo, existing: SyncStatus):
-        cfg = self._build_connector_config(table_info)
-        name = cfg.get("name")
-        self.logger.info("Reconciliation check", table=table_info.full_name, connector_name=name, existing_status=existing)
-
-        if not self._validate_connector_config(cfg):
-            self.logger.error("Connector config validation failed", config=cfg)
-            return False
-
-        if existing.connector_exists and existing.last_connector_state == "RUNNING":
-            self.logger.info("Connector already exists and is RUNNING", connector_name=name)
-            return True
-
-        if existing.connector_exists:
-            self.logger.info("Connector exists but is not RUNNING", connector_name=name, last_state=existing.last_connector_state)
-            if self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.RECREATE_FAILED_CONNECTORS.value, False):
-                self.logger.info("Recreating failed connector", connector_name=name)
-                self._kc_delete_connector(name)
-                time.sleep(2)
-                return self._kc_create_connector(name, cfg)
-
-            self.logger.warning("Connector is not RUNNING; manual intervention required", connector_name=name, last_state=existing.last_connector_state)
-            return False
-
-        self.logger.info("Creating new connector", connector_name=name)
-        return self._kc_create_connector(name, cfg)
-
-    def _reconcile_table(self, table_info: TableInfo):
-        self.logger.info("Starting reconciliation", table=table_info.full_name)
-        status = self.status_table.get(table_info.full_name)
-        if not status:
-            self.logger.warning("No status found for table; skipping reconciliation", table=table_info.full_name)
-            return
-
-        if status.annotation_enabled and not table_info.annotation:
-            self.logger.info("Enabling annotation for table", table=table_info.full_name)
-            table_info.annotation = TableAnnotation()  # Enable with default settings
-
-        if not status.connector_exists:
-            self.logger.info("No connector found; creating one", table=table_info.full_name)
-            self._reconcile_connector(table_info, status)
-            return
-
-        self.logger.info("Connector exists; checking status", table=table_info.full_name)
-        conn_status = self._kc_connector_status(status.name)
-        if not conn_status:
-            self.logger.warning("Failed to fetch connector status; assuming absent", connector_name=status.name)
-            status.connector_exists = False
-            return
-
-        tasks_running = sum(1 for t in conn_status.get("tasks", []) if t.get("state") == "RUNNING")
-        if tasks_running == len(conn_status["tasks"]):
-            self.logger.info("All tasks are RUNNING", connector_name=status.name)
-            status.last_connector_state = "RUNNING"
-            return
-
-        self.logger.warning("Some tasks are not RUNNING", connector_name=status.name, tasks=conn_status["tasks"])
-        status.last_connector_state = "PARTIALLY_RUNNING"
-
-    def _reconcile(self):
-        self.logger.info("Starting reconciliation loop")
-        for table_name, status in self.status_table.items():
-            try:
-                table_info = status.table_info
-                self._reconcile_table(table_info)
-                self.logger.info("Reconciliation complete", table=table_info.full_name)
-            except Exception as e:
-                self.logger.error("Error during reconciliation", table=table_name, error=str(e))
-
     # ----------------------------- Orchestrator Loop -----------------------------
-    def _build_connector_config(self, table_info: TableInfo) -> Dict[str, Any]:
-        base_cfg = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}) or {}
-        cfg = dict(base_cfg)  # Start with base config
-
-        topic_prefix = (cfg.get("topic_prefix", "ybcdc") or "").strip()
-        if not topic_prefix:
-            topic_prefix = "ybcdc"
-        server_name = f"{table_info.database}_{table_info.schema}_{table_info.table}"
-
-        cfg.update({
-            "name": f"ybcdc-{server_name}",
-            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-            "tasks.max": "1",
-            "database.server.name": server_name,
-            "table.include.list": f"{table_info.schema}.{table_info.table}",
-            "topic.prefix": topic_prefix,
-            "topic.creation.default.partitions": "1",
-            "topic.creation.default.replication.factor": "3",
-        })
-
-        yb_cfg = self.config.get(ConfigKeys.YUGABYTEDB.value, {}) or {}
-        if 'host' in yb_cfg:
-            cfg['database.hostname'] = yb_cfg['host']
-        if 'port' in yb_cfg:
-            cfg['database.port'] = str(yb_cfg['port'])
-        if 'user' in yb_cfg:
-            cfg['database.user'] = yb_cfg['user']
-        if 'password' in yb_cfg:
-            cfg['database.password'] = yb_cfg['password']
-        if 'sslmode' in yb_cfg:
-            cfg['database.sslmode'] = yb_cfg['sslmode']
-
-        if table_info.annotation and table_info.annotation.cdc_stream_id:
-            cfg['cdc.stream.id'] = table_info.annotation.cdc_stream_id
-        elif self.cdc_manager.master_addresses:
-            stream_id = self.cdc_manager.ensure_cdc_stream(table_info)
-            if stream_id:
-                cfg['cdc.stream.id'] = stream_id
-
-        self.logger.debug("Built connector config", table=table_info.full_name, config=self._redact(cfg))
-        return cfg
     
-    def _derive_project_id(self):
-        try:
-            bq = self.config.get(ConfigKeys.BIGQUERY.value, {}) or {}
-            project_id = bq.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.PROJECT_ID.value, None)
-            if project_id:
-                self.logger.info("Project ID derived from config", project_id=project_id)
-                return project_id
-
-            # Attempt to infer project ID from environment
-            if os.getenv("GOOGLE_CLOUD_PROJECT"):
-                inferred = os.getenv("GOOGLE_CLOUD_PROJECT")
-                self.logger.info("Project ID inferred from environment", project_id=inferred)
-                return inferred
-
-            self.logger.warning("No project ID configured or inferred")
-        except Exception as e:
-            self.logger.error("Error deriving project ID", error=str(e))
-
-    def _table_sync_loop(self, sync_status: SyncStatus):
-        name = sync_status.table_info.full_name
-        self.logger.info("Starting table sync loop", table=name)
-        self.status_table[name].sync_active = True
+    def _table_sync_loop(self):
+        self.logger.info("Starting table sync loop")
         try:
             while self.running:
                 start = time.time()
-                self.logger.info("Beginning processing", table=name)
+                self.logger.info("Beginning processing")
                 try:
                     # Discover databases and create connectors as needed
-                    databases = self._discover_databases()
+                    databases = self.yugabyte_manager._discover_databases()
                     self.logger.info("Databases discovered", databases=databases)
 
                     for db in databases:
-                        tables = self._discover_tables(db)
+                        tables = self.yugabyte_manager._discover_tables(db)
                         self.logger.info("Tables discovered", database=db, tables=[t.table for t in tables])
 
                         for table_info in tables:
@@ -535,17 +270,15 @@ class TableSyncOrchestrator:
                                     self.logger.error("Error tearing down connectors", table=table, error=str(e))
                                     
                 except Exception as e:
-                    self.logger.error("Error during table sync", table=name, error=str(e))
-                    self.status_table[name].last_error = str(e)
+                    self.logger.error("Error during table sync", error=str(e))
                 finally:
                     elapsed = time.time() - start
-                    self.logger.info("Scan loop complete", table=name, elapsed_time=elapsed)
+                    self.logger.info("Scan loop complete", elapsed_time=elapsed)
                     time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value, 10) - elapsed))
         except Exception as e:
-            self.logger.error("Unexpected error in table sync loop", table=name, error=str(e))
+            self.logger.error("Unexpected error in table sync loop", error=str(e))
         finally:
-            self.logger.info("Table sync loop exiting", table=name)
-            self.status_table[name].sync_active = False
+            self.logger.info("Table sync loop exiting")
 
     def start(self):
         self.logger.info("Starting orchestrator")
@@ -553,7 +286,7 @@ class TableSyncOrchestrator:
         self.logger.info("Starting processing loop")
         try:
             with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
-                futures = {executor.submit(self._table_sync_loop, ti): ti for ti in self.status_table.values()}
+                futures = {executor.submit(self._table_sync_loop)}
 
                 for future in as_completed(futures):
                     ti = futures[future]

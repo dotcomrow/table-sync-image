@@ -6,8 +6,10 @@ import os
 import json
 
 import structlog
+from psycopg2.extras import RealDictCursor
 from classes.config_reader import ConfigKeys, LoggingKeys, YugabyteDBKeys
 from classes.table_info import TableInfo  # <-- Add this import
+from classes.table_annotation import TableAnnotation
 
 class YugabyteDBManager:
     def __init__(self, config):
@@ -78,6 +80,44 @@ class YugabyteDBManager:
         finally:
             connection.close()
             self.logger.info("Connection to YugabyteDB closed")
+            
+    # ----------------------------- Discovery -----------------------------
+
+    def _filter_excluded_databases(self, all_databases: List[str]) -> List[str]:
+        ex_cfg = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, 'postgres,template0,template1')
+        excluded = [d.strip() for d in ex_cfg.split(',')] if isinstance(ex_cfg, str) else (ex_cfg or [])
+        kept = [d for d in all_databases if d not in excluded]
+        self.logger.debug("Database filtering applied",
+                          total_databases=len(all_databases),
+                          excluded_databases=excluded,
+                          remaining_databases=len(kept))
+        return kept
+
+    def _discover_databases(self) -> List[str]:
+        excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
+        return self.discover_databases(excluded)
+
+    def _discover_tables(self, database: str) -> List[TableInfo]:
+        out: List[TableInfo] = []
+        try:
+            with self.connect() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT t.table_schema,
+                           t.table_name,
+                           obj_description(c.oid) AS table_comment
+                    FROM information_schema.tables t
+                    JOIN pg_class c       ON c.relname = t.table_name
+                    JOIN pg_namespace n   ON n.oid = c.relnamespace AND n.nspname = t.table_schema
+                    WHERE t.table_type = 'BASE TABLE'
+                      AND t.table_schema NOT IN ('information_schema','pg_catalog','pg_toast')
+                    ORDER BY t.table_schema, t.table_name
+                """)
+                for row in cur.fetchall():
+                    ann = TableAnnotation.from_comment(self.config, row['table_comment']) if row['table_comment'] else None
+                    out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
+        except Exception as e:
+            self.logger.error("Failed to discover tables", database=database, error=str(e))
+        return out
 
     def create_table(self, table_name: str, schema: str):
         """Create a table in the YugabyteDB database."""
