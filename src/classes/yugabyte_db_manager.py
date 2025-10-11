@@ -39,14 +39,14 @@ class YugabyteDBManager:
         )
         return structlog.get_logger("yugabyte_db_manager")
 
-    def connect(self):
+    def connect(self, database: str = None):
         if self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False):
             self.logger.info("Mock connect called")
             from unittest.mock import MagicMock
             return MagicMock()
         
         """Establish a connection to the YugabyteDB database."""
-        self.logger.info("Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=self.database)
+        self.logger.info("Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=database)
         try:
             connection = psycopg2.connect(
                 host=self.host,
@@ -61,10 +61,10 @@ class YugabyteDBManager:
             self.logger.error("Failed to connect to YugabyteDB", error=str(e))
             raise RuntimeError(f"Failed to connect to YugabyteDB: {e}")
 
-    def run_query(self, query: str, params: List[Any] = None):
+    def run_query(self, query: str, params: List[Any] = None, database: str = None):
         """Run a query on the YugabyteDB database."""
         self.logger.info("Running query on YugabyteDB", query=query, params=params)
-        connection = self.connect()
+        connection = self.connect(database or self.database)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
@@ -92,7 +92,7 @@ class YugabyteDBManager:
         excluded = excluded or ['postgres', 'template0', 'template1']
         query = "SELECT datname FROM pg_database WHERE datistemplate = false;"
         self.logger.info("Discovering databases", excluded=excluded)
-        all_databases = [row[0] for row in self.run_query(query)]
+        all_databases = [row[0] for row in self.run_query(query, self.database)]
         databases = [db for db in all_databases if db not in excluded]
         self.logger.info("Databases discovered", databases=databases)
         return databases
@@ -101,7 +101,7 @@ class YugabyteDBManager:
         """Discover all tables in all schemas of the specified database."""
         out: List[TableInfo] = []
         try:
-            with self.connect() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT t.table_schema,
                            t.table_name,
@@ -120,48 +120,6 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
-
-    def create_table(self, table_name: str, schema: str):
-        """Create a table in the YugabyteDB database."""
-        query = f"CREATE TABLE {schema}.{table_name} (id SERIAL PRIMARY KEY);"
-        self.logger.info("Creating table", table_name=table_name, schema=schema)
-        self.run_query(query)
-        self.logger.info("Table created successfully", table_name=table_name, schema=schema)
-
-    def delete_table(self, table_name: str, schema: str):
-        """Delete a table from the YugabyteDB database."""
-        query = f"DROP TABLE IF EXISTS {schema}.{table_name};"
-        self.logger.info("Deleting table", table_name=table_name, schema=schema)
-        self.run_query(query)
-        self.logger.info("Table deleted successfully", table_name=table_name, schema=schema)
-
-    def create_database(self, database_name: str):
-        """Create a new database in YugabyteDB."""
-        query = f"CREATE DATABASE {database_name} IF NOT EXISTS;"
-        self.logger.info("Creating database", database_name=database_name)
-        self.run_query(query)
-        self.logger.info("Database created successfully", database_name=database_name)
-
-    def delete_database(self, database_name: str):
-        """Delete a database from YugabyteDB."""
-        query = f"DROP DATABASE IF EXISTS {database_name};"
-        self.logger.info("Deleting database", database_name=database_name)
-        self.run_query(query)
-        self.logger.info("Database deleted successfully", database_name=database_name)
-
-    def create_schema(self, schema_name: str):
-        """Create a schema in the YugabyteDB database."""
-        query = f"CREATE SCHEMA {schema_name};"
-        self.logger.info("Creating schema", schema_name=schema_name)
-        self.run_query(query)
-        self.logger.info("Schema created successfully", schema_name=schema_name)
-
-    def delete_schema(self, schema_name: str):
-        """Delete a schema from the YugabyteDB database."""
-        query = f"DROP SCHEMA IF EXISTS {schema_name} CASCADE;"
-        self.logger.info("Deleting schema", schema_name=schema_name)
-        self.run_query(query)
-        self.logger.info("Schema deleted successfully", schema_name=schema_name)
 
     def create_stream(self, database_name: str) -> str:
         """Create a CDC stream for a given database using yb-admin."""
@@ -197,7 +155,7 @@ class YugabyteDBManager:
         self.logger.error("Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
 
-    def insert_debezium_signal(self, table_info: TableInfo):
+    def insert_debezium_signal(self, table_info: TableInfo, database: str = None):
         """Insert a record into the public.debezium_signal table."""
         query = """
         INSERT INTO public.debezium_signal (id, type, data)
@@ -210,7 +168,7 @@ class YugabyteDBManager:
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
         self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data)
         try:
-            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data])
+            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data], database=database)
             self.logger.info("Record inserted successfully", table_name=table_info.table)
         except Exception as e:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
@@ -227,7 +185,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.info("Creating debezium_signal table if not exists")
-        self.run_query(query)
+        self.run_query(query, self.database)
         self.logger.info("debezium_signal table created or already exists")
 
     def entry_exists_in_debezium_signal(self, table_info: TableInfo) -> bool:
@@ -240,7 +198,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.info("Checking if entry exists in debezium_signal table", id=table_id)
-        result = self.run_query(query)
+        result = self.run_query(query, database=self.database)
         exists = result[0][0] if result else False
         self.logger.info("Entry existence check in debezium_signal table completed", exists=exists)
         return exists
@@ -253,7 +211,7 @@ class YugabyteDBManager:
         WHERE table_database = %s;
         """
         self.logger.info("Fetching table entries from debezium_signal table", database=database)
-        result = self.run_query(query, [database])
+        result = self.run_query(query, [database], database=database)
         self.logger.info("Table entries fetched from debezium_signal table", count=len(result))
         return result
     
@@ -266,7 +224,7 @@ class YugabyteDBManager:
         table_identifier = f"{database}.{table}"
         self.logger.info("Removing entry from debezium_signal table", database=database, table=table)
         try:
-            self.run_query(query, [database, table_identifier])
+            self.run_query(query, [database, table_identifier], database=database)
             self.logger.info("Entry removed successfully from debezium_signal table", database=database, table=table)
         except Exception as e:
             self.logger.error("Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))

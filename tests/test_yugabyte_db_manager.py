@@ -13,22 +13,6 @@ class TestYugabyteDBManager(unittest.TestCase):
         self.config = ConfigReader(config_path).load_config()
         self.manager = YugabyteDBManager(self.config)
 
-    def test_create_table(self):
-        self.manager.create_table("test_table", "public")
-        # Add assertions or mock checks here
-
-    def test_delete_table(self):
-        self.manager.delete_table("test_table", "public")
-        # Add assertions or mock checks here
-
-    def test_create_schema(self):
-        self.manager.create_schema("test_schema")
-        # Add assertions or mock checks here
-
-    def test_delete_schema(self):
-        self.manager.delete_schema("test_schema")
-        # Add assertions or mock checks here
-
     def test_insert_debezium_signal(self):
         table_info = TableInfo(database="test_db", schema="public", table="test_table", annotation=None)
         self.manager.insert_debezium_signal(table_info)
