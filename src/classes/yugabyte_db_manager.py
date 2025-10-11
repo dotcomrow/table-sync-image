@@ -83,16 +83,6 @@ class YugabyteDBManager:
             
     # ----------------------------- Discovery -----------------------------
 
-    def _filter_excluded_databases(self, all_databases: List[str]) -> List[str]:
-        ex_cfg = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, 'postgres,template0,template1')
-        excluded = [d.strip() for d in ex_cfg.split(',')] if isinstance(ex_cfg, str) else (ex_cfg or [])
-        kept = [d for d in all_databases if d not in excluded]
-        self.logger.debug("Database filtering applied",
-                          total_databases=len(all_databases),
-                          excluded_databases=excluded,
-                          remaining_databases=len(kept))
-        return kept
-
     def _discover_databases(self) -> List[str]:
         excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
         return self.discover_databases(excluded)
