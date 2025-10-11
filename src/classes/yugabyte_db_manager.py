@@ -114,6 +114,10 @@ class YugabyteDBManager:
                       AND t.table_catalog = %s
                     ORDER BY t.table_schema, t.table_name
                 """
+                cur.execute("SHOW search_path;")
+                self.logger.debug("Session search_path", search_path=cur.fetchone())
+                cur.execute("SELECT current_database();")
+                self.logger.debug("Current database", current_database=cur.fetchone())
                 self.logger.debug("Executing SQL query", query=sql_query, params=(database,))
                 cur.execute(sql_query, (database,))
                 rows = cur.fetchall()
