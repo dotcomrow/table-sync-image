@@ -147,7 +147,7 @@ class YugabyteDBManager:
 
     def create_database(self, database_name: str):
         """Create a new database in YugabyteDB."""
-        query = f"CREATE DATABASE {database_name};"
+        query = f"CREATE DATABASE {database_name} IF NOT EXISTS;"
         self.logger.info("Creating database", database_name=database_name)
         self.run_query(query)
         self.logger.info("Database created successfully", database_name=database_name)

@@ -263,6 +263,7 @@ class TableSyncOrchestrator:
                                 try:
                                     self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
                                     self.kafka_connector.reset_connectors(table_info)
+                                    self.bigquery_manager.delete_table(table_info)
                                 except Exception as e:
                                     self.logger.error("Error tearing down connectors", table=table, error=str(e))
                                     

@@ -6,6 +6,7 @@ from typing import Optional
 import json
 import time
 import structlog
+from classes.bigquery_manager import BigQueryManager
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, LoggingKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
 from classes.yugabyte_db_manager import YugabyteDBManager
@@ -23,6 +24,7 @@ class KafkaConnector:
         self.password = db_cfg.get(YugabyteDBKeys.PASSWORD.value, 'yugabyte')
         self.database = db_cfg.get(YugabyteDBKeys.DATABASE.value, 'yugabyte')
         self.yugabyte_manager = YugabyteDBManager(config)
+        self.bigquery_manager = BigQueryManager(config)
         self.db_master_addresses = db_cfg.get(YugabyteDBKeys.MASTER_ADDRESSES.value, None)
         self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         
@@ -367,6 +369,7 @@ class KafkaConnector:
             "mergeIntervalMs": "60000",
         }
 
+        self.bigquery_manager.create_dataset(table_info)
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
         response = self._send_connector_request(sink_connector_name, sink_config)
         self.logger.info("Sink connector created", response=response)
