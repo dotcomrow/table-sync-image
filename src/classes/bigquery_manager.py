@@ -72,7 +72,9 @@ class BigQueryManager:
             return False
 
     def fetch_bigquery_data(self, table_info: TableInfo):
+        self.logger.info("Fetch BigQuery data", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table)
         self._initialize_client()
         query = f"SELECT * FROM `{table_info.bq_dataset}.{table_info.bq_table}`"
+        self.logger.info("Executing BigQuery", query=query)
         query_job = self.client.query(query)
         return [dict(row) for row in query_job]
