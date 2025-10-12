@@ -3,7 +3,6 @@ from google.oauth2 import service_account
 from classes.config_reader import ConfigKeys, BigQueryKeys
 from classes.table_info import TableInfo
 from classes.logging import Logging
-import logging
 
 class BigQueryManager:
     def __init__(self, config):

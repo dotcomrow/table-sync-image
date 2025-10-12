@@ -29,7 +29,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Optional
-import logging
 
 from flask import Flask, jsonify
 from classes.table_info import TableInfo

@@ -9,7 +9,6 @@ from classes.config_reader import ConfigKeys,KafkaConnectKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
 from classes.yugabyte_db_manager import YugabyteDBManager
 from classes.logging import Logging
-import logging
 
 class KafkaConnector:
     def __init__(self, config):

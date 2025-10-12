@@ -10,7 +10,6 @@ from classes.config_reader import ConfigKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
 from classes.logging import Logging
-import logging
 
 class YugabyteDBManager:
     def __init__(self, config):
