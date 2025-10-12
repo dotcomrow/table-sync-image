@@ -267,7 +267,7 @@ class YugabyteDBManager:
         self.logger.info("Clearing YugabyteDB table", database=database, table=table_info.table)
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(f"TRUNCATE TABLE {table_info.table}")
+                cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table}")
                 conn.commit()
         finally:
             conn.close()
@@ -280,7 +280,7 @@ class YugabyteDBManager:
                 # Assuming the table has columns matching the BigQuery table
                 columns = ", ".join(data[0].keys())
                 values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
-                query = f"INSERT INTO {table_info.table} ({columns}) VALUES ({values_placeholder})"
+                query = f"INSERT INTO {table_info.schema}.{table_info.table} ({columns}) VALUES ({values_placeholder})"
 
                 # Use execute_batch for better performance with large volumes of data
                 execute_batch(cursor, query, data)
