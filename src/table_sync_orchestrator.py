@@ -168,7 +168,7 @@ class TableSyncOrchestrator:
                     
                     self.logger.info("Table does not have entry in debezium signal table, checking connectors", table=table_info.table)
                     connector_statuses = self.kafka_connector.check_connector_exists(table_info)
-                    if not connector_statuses['source'] or not connector_statuses['sink']:
+                    if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
                         try:
                             self.kafka_connector.setup_connectors(table_info)
                         except Exception as e:
@@ -183,7 +183,7 @@ class TableSyncOrchestrator:
                 else:
                     self.logger.info("Table already has entry in debezium signal table, check if connectors are running", table=table_info.table)
                     connector_statuses = self.kafka_connector.check_connector_exists(table_info)
-                    if not connector_statuses['source'] or not connector_statuses['sink']:
+                    if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
                         self.logger.info("One or more connectors do not exist, setting up connectors", table=table_info.table)
                         try:
                             self.kafka_connector.reset_connectors(table_info)
