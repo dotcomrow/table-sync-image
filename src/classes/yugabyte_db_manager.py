@@ -268,12 +268,12 @@ class YugabyteDBManager:
                     public.debezium_signal;
             """, database=self.database)
             for entry in entries:
-                self.logger.info("Removing CDC stream for entry", database=entry['table_database'], table=entry['table_name'])
+                self.logger.info("Removing CDC stream for entry", database=entry.table_database, table=entry.table_name)
                 try:
-                    self.delete_stream(self.find_stream_for_database(entry['table_database']))
+                    self.delete_stream(self.find_stream_for_database(entry.table_database))
                 except Exception as e:
-                    self.logger.error("Failed to delete CDC stream for entry", database=entry['table_database'], table=entry['table_name'], error=str(e))
-                    
+                    self.logger.error("Failed to delete CDC stream for entry", database=entry.table_database, table=entry.table_name, error=str(e))
+
             self.logger.info("debezium_signal table already exists, clearing table")
             self.run_query(query="TRUNCATE TABLE public.debezium_signal;", database=self.database)
         
