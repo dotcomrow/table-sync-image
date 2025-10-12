@@ -173,8 +173,8 @@ class KafkaConnector:
         
     def setup_connectors(self, table_info: TableInfo):
         self.logger.info("Setting up Kafka connectors for table", table=table_info.full_name)
-        self.kafka_connector.create_source_connector(table_info)
-        self.kafka_connector.create_sink_connector(table_info)
+        self.create_source_connector(table_info)
+        self.create_sink_connector(table_info)
         
         start_time = time.time()
         timeout = 3 * 60  # 3 minutes in seconds
