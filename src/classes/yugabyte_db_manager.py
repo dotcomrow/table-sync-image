@@ -342,32 +342,23 @@ class YugabyteDBManager:
                 for row in data:
                     for key, value in row.items():
                         if isinstance(value, dict):
-                            if column_types.get(key) in ("json", "jsonb"):
+                            if key == "id" and "id" in value:
+                                # Unwrap the 'id' field
+                                row[key] = value["id"]
+                            elif column_types.get(key) in ("json", "jsonb"):
+                                # Convert dict to JSON string
                                 row[key] = json.dumps(value)
                             else:
                                 self.logger.warning("Unexpected dict value for non-JSON column", column=key, value=value)
                                 row[key] = str(value)  # Fallback to string conversion
 
-                self.logger.info("Unwrapping 'id' fields in data")
-                data = self.unwrap_id_field(data)
-
                 self.logger.debug("Data prepared for insertion", data=data)
 
                 # Use execute_batch for better performance with large volumes of data
                 execute_batch(cursor, query, data)
-
-                conn.commit()
                 
-            self.logger.info("Data inserted successfully into YugabyteDB", database=database, table=table_info.table)
+                conn.commit()
+                self.logger.info("Data inserted successfully", database=database, table=table_info.table, row_count=len(data))
         except Exception as e:
-            self.logger.error("Failed to insert data into Yugabyte", error=str(e))
-            raise
-        finally:
-            conn.close()
-
-    def unwrap_id_field(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Unwrap the 'id' field in the data if it is in the format {'id': value}."""
-        for row in data:
-            if 'id' in row and isinstance(row['id'], dict) and 'id' in row['id']:
-                row['id'] = row['id']['id']
-        return data
+            self.logger.error("Failed to insert data into YugabyteDB", database=database, table=table_info.table, error=str(e))
+            raise RuntimeError(f"Failed to insert data into YugabyteDB: {e}")
