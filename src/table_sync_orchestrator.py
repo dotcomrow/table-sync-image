@@ -227,7 +227,7 @@ class TableSyncOrchestrator:
                                 try:
                                     future.result()
                                 except Exception as e:
-                                    self.logger.error("Error in table sync loop", table=ti.table_info.table, error=str(e))
+                                    self.logger.error("Error in table sync loop", error=str(e))
                         
                     except Exception as e:
                         self.logger.error("Error during table sync", error=str(e))
