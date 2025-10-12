@@ -51,7 +51,6 @@ class TableSyncOrchestrator:
         self.running = False
         self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()
-        self.mock_enabled = self.config.get(ConfigKeys.MOCK.value, False)
 
         self.yugabyte_manager.create_debezium_signal_table()
         import os
