@@ -15,7 +15,7 @@ class TestYugabyteDBManager(unittest.TestCase):
 
     def test_insert_debezium_signal(self):
         table_info = TableInfo(database="testdb", schema="public", table="test_table", annotation=None)
-        self.manager.insert_debezium_signal(table_info)
+        self.manager.insert_debezium_signal(table_info, "stream123")
         # Add assertions or mock checks here
         
     def test_discover_tables(self):

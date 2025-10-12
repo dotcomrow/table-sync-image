@@ -260,7 +260,7 @@ class KafkaConnector:
         response = self._send_connector_request(source_connector_name, source_config)
         self.logger.info("Source connector created", response=response)
         # Insert debezium signal record
-        self.yugabyte_manager.insert_debezium_signal(table_info)
+        self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
 
 
     def create_sink_connector(self, table_info: TableInfo):

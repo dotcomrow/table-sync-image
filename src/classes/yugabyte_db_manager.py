@@ -234,21 +234,22 @@ class YugabyteDBManager:
         self.logger.error("Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
 
-    def insert_debezium_signal(self, table_info: TableInfo):
+    def insert_debezium_signal(self, table_info: TableInfo, stream_id: str):
         """Insert a record into the public.debezium_signal table."""
         query = """
-        INSERT INTO public.debezium_signal (id, type, data, table_database)
+        INSERT INTO public.debezium_signal (id, type, data, table_database, stream_id)
         VALUES (
           %s,
           'execute-snapshot',
+          %s,
           %s,
           %s
         );
         """
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
-        self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data)
+        self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id)
         try:
-            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database], database=self.database)
+            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database, stream_id], database=self.database)
             self.logger.info("Record inserted successfully", table_name=table_info.table)
         except Exception as e:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
@@ -298,7 +299,8 @@ class YugabyteDBManager:
             id   text PRIMARY KEY,
             type text NOT NULL,
             data jsonb,
-            table_database text
+            table_database text,
+            stream_id text
         );
         """
         self.logger.info("Creating debezium_signal table if not exists")
