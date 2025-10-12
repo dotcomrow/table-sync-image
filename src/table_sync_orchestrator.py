@@ -162,7 +162,7 @@ class TableSyncOrchestrator:
                             bigquery_data = self.bigquery_manager.fetch_bigquery_data(table_info)
                             self.logger.info("Fetched data from BigQuery", table=table_info.table, row_count=len(bigquery_data))
                             self.yugabyte_manager.clear_yugabyte_table(db, table_info)
-                            self.logger.info("Cleared YugabyteDB table before backfill", database=db, table=table_info
+                            self.logger.info("Cleared YugabyteDB table before backfill", database=db, table_info=table_info.table)
                             self.yugabyte_manager.insert_into_yugabyte(bigquery_data, db, table_info)
                             self.logger.info("Backfill from BigQuery to YugabyteDB completed", table=table_info.table)
                         except Exception as e:
