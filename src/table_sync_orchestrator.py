@@ -159,7 +159,9 @@ class TableSyncOrchestrator:
                         # Here you would implement the logic to backfill data from BigQuery to YugabyteDB
                         # This is a placeholder for the actual backfill logic
                         try:
-                            self.yugabyte_manager.backfill_from_bigquery(table_info)
+                            bigquery_data = self.bigquery_manager.fetch_bigquery_data(table_info)
+                            self.yugabyte_manager.clear_yugabyte_table(db, table_info)
+                            self.yugabyte_manager.insert_into_yugabyte(bigquery_data, db, table_info)
                             self.logger.info("Backfill from BigQuery to YugabyteDB completed", table=table_info.table)
                         except Exception as e:
                             self.logger.error("Error during backfill from BigQuery", table=table_info.table, error=str(e))

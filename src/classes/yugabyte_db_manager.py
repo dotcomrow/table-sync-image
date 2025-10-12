@@ -7,7 +7,7 @@ import os
 import json
 
 import structlog
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_batch
 from classes.config_reader import ConfigKeys, LoggingKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
@@ -256,8 +256,14 @@ class YugabyteDBManager:
                 # Assuming the table has columns matching the BigQuery table
                 columns = ", ".join(data[0].keys())
                 values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
-            query = f"INSERT INTO {table_info.table} ({columns}) VALUES ({values_placeholder})"
-            # execute_batch(cursor, query, data)
-            conn.commit()
+                query = f"INSERT INTO {table_info.table} ({columns}) VALUES ({values_placeholder})"
+
+                # Use execute_batch for better performance with large volumes of data
+                execute_batch(cursor, query, data)
+
+                conn.commit()
+        except Exception as e:
+            self.logger.error("Failed to insert data into Yugabyte", error=str(e))
+            raise
         finally:
             conn.close()
