@@ -17,7 +17,6 @@ pyyaml==6.0.1                # YAML configuration parsing
 structlog==23.2.0            # Structured logging (used by major companies)
 
 # Monitoring & Health Checks - Proven Solutions
-prometheus-client==0.19.0    # Prometheus metrics (industry standard)
 flask==3.0.0                 # Lightweight web framework for health checks
 prometheus_client            # Prometheus client library
 

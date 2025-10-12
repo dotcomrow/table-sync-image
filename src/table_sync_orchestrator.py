@@ -25,16 +25,14 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any
 from datetime import datetime
 
 import structlog
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from flask import Flask, jsonify
 
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
-from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, HealthCheckKeys, MetricsKeys
+from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, LoggingKeys, HealthCheckKeys
 from classes.yugabyte_db_manager import YugabyteDBManager
 
 HAVE_KAFKA = True
@@ -49,7 +47,6 @@ class TableSyncOrchestrator:
         self.kafka_connector = KafkaConnector(self.config)
         self.bigquery_manager = BigQueryManager(self.config)
         self.running = False
-        self.metrics = None  # Metrics disabled for testing
         self.logger = self._init_logger()
 
         self.yugabyte_manager.create_debezium_signal_table()
@@ -57,8 +54,6 @@ class TableSyncOrchestrator:
         if start_servers:
             if not os.getenv('DISABLE_HEALTH'):
                 self._start_health_server()
-            if not os.getenv('DISABLE_METRICS'):
-                self._start_metrics_server()
 
     # ----------------------------- Logging & Metrics -----------------------------
 
@@ -78,17 +73,6 @@ class TableSyncOrchestrator:
         )
         return structlog.get_logger("table_sync_orchestrator")
 
-    def _init_metrics(self) -> Dict[str, Any]:
-        return {
-            'tables_scanned': Counter('sync_tables_scanned_total', 'Total tables scanned'),
-            'tables_synced': Counter('sync_tables_synced_total', 'Total tables synced'),
-            'sync_errors': Counter('sync_errors_total', 'Total sync errors', ['error_type']),
-            'scan_duration': Histogram('sync_scan_duration_seconds', 'Time spent scanning'),
-            'active_syncs': Gauge('sync_active_syncs', 'Number of active syncs'),
-            'connectors_running': Gauge('sync_connectors_running', 'Number of connectors with all tasks RUNNING'),
-            'last_scan_time': Gauge('sync_last_scan_timestamp', 'Timestamp of last scan'),
-        }
-
     # ----------------------------- Health & Metrics Servers -----------------------------
 
     def _start_health_server(self):
@@ -102,36 +86,12 @@ class TableSyncOrchestrator:
         def ready():
             return jsonify({'status': 'ready', 'running': self.running})
 
-        @app.route('/status')
-        def status():
-            # Summarize status table
-            out = []
-            # for k, v in self.status_table.items():
-            #     out.append({
-            #         "table": v.table_info.full_name,
-            #         "annotation_enabled": v.annotation_enabled,
-            #         "bigquery_exists": v.bigquery_exists,
-            #         "connector_exists": v.connector_exists,
-            #         "sync_active": v.sync_active,
-            #         "last_connector_state": v.last_connector_state,
-            #         "expected_topic": v.expected_topic,
-            #         "topic_exists": v.topic_exists,
-            #         "last_error": v.last_error,
-            #         "last_scan": v.last_scan.isoformat(),
-            #     })
-            return jsonify({"tables": out, "ts": datetime.utcnow().isoformat()})
-
         def run_server():
             port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
         self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
-
-    def _start_metrics_server(self):
-        port = int((self.config.get(ConfigKeys.METRICS.value, {}) or {}).get(MetricsKeys.PORT.value, 8000))
-        start_http_server(port)
-        self.logger.info("Metrics server started", port=port)
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
@@ -208,8 +168,6 @@ class TableSyncOrchestrator:
                 except Exception as e:
                     self.logger.error("Error tearing down connectors", table=table, error=str(e))
                                     
-
-
     def start(self):
         self.logger.info("Starting orchestrator")
         self.running = True

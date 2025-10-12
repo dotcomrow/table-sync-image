@@ -13,7 +13,6 @@ class ConfigKeys(Enum):
     KAFKA_CONNECT = "kafka_connect"
     LOGGING = "logging"
     HEALTH_CHECK = "health_check"
-    METRICS = "metrics"
     PROCESSING = "processing"
     
 class YugabyteDBKeys(Enum):
@@ -41,10 +40,6 @@ class LoggingKeys(Enum):
     LEVEL = "level"
     
 class HealthCheckKeys(Enum):
-    ENABLED = "enabled"
-    PORT = "port"
-    
-class MetricsKeys(Enum):
     ENABLED = "enabled"
     PORT = "port"
     
@@ -153,11 +148,6 @@ class ConfigReader:
         if not isinstance(health_check, dict):
             errors.append("health_check must be a dictionary")
 
-        # Validate metrics
-        metrics = config.get(ConfigKeys.METRICS.value, {})
-        if not isinstance(metrics, dict):
-            errors.append("metrics must be a dictionary")
-
         # Validate processing
         processing = config.get(ConfigKeys.PROCESSING.value, {})
         if not isinstance(processing, dict):
@@ -186,7 +176,7 @@ class ConfigReader:
 
         enum_classes = [
             ConfigKeys, YugabyteDBKeys, BigQueryKeys, KafkaConnectKeys,
-            LoggingKeys, HealthCheckKeys, MetricsKeys, ProcessingKeys
+            LoggingKeys, HealthCheckKeys, ProcessingKeys
         ]
 
         with ThreadPoolExecutor() as executor:
