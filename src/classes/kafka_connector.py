@@ -155,7 +155,6 @@ class KafkaConnector:
             self.logger.debug("Kafka Connect sink status response", status_code=response.status_code, response_text=response.text)
             sink_exists = response.status_code == 200
             self.logger.info("Connector sink existence check completed", exists=sink_exists)
-            return sink_exists
         except Exception as e:
             self.logger.error("Exception while checking connector existence", error=str(e))
 
