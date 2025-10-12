@@ -38,7 +38,6 @@ class YugabyteDBKeys(Enum):
     MOCK = "mock"
     
 class BigQueryKeys(Enum):
-    PROJECT_ID = "project_id"
     DATASET = "dataset"
     CREDENTIALS_PATH = "credentials_path"
     DEFAULT_BACKUP_DATASET = "default_backup_dataset"

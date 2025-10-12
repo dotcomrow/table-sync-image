@@ -15,7 +15,6 @@ yugabytedb:
 
 bigquery:
   mock: false
-  project_id: k8s-kafka-774d
   credentials_path: /vault/secrets/gcp-key.json
   location: US
 

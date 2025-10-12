@@ -1,4 +1,5 @@
 from asyncio import subprocess
+from multiprocessing.dummy import connection
 import psycopg2
 from typing import Any, List
 import re
@@ -166,7 +167,7 @@ class YugabyteDBManager:
         self.logger.error("Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
 
-    def insert_debezium_signal(self, table_info: TableInfo, database: str = None):
+    def insert_debezium_signal(self, table_info: TableInfo):
         """Insert a record into the public.debezium_signal table."""
         query = """
         INSERT INTO public.debezium_signal (id, type, data)
@@ -179,7 +180,7 @@ class YugabyteDBManager:
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
         self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data)
         try:
-            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data], database=database)
+            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data], database=self.database)
             self.logger.info("Record inserted successfully", table_name=table_info.table)
         except Exception as e:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
@@ -205,11 +206,11 @@ class YugabyteDBManager:
         query = """
         SELECT EXISTS (
             SELECT 1 FROM public.debezium_signal
-            WHERE id = {table_id}
+            WHERE id = %s
         );
         """
         self.logger.info("Checking if entry exists in debezium_signal table", id=table_id)
-        result = self.run_query(query, database=self.database)
+        result = self.run_query(query, [table_id], database=self.database)
         exists = result[0][0] if result else False
         self.logger.info("Entry existence check in debezium_signal table completed", exists=exists)
         return exists
@@ -222,7 +223,7 @@ class YugabyteDBManager:
         WHERE table_database = %s;
         """
         self.logger.info("Fetching table entries from debezium_signal table", database=database)
-        result = self.run_query(query, [database], database=database)
+        result = self.run_query(query, [database], database=self.database)
         self.logger.info("Table entries fetched from debezium_signal table", count=len(result))
         return result
     
@@ -235,8 +236,28 @@ class YugabyteDBManager:
         table_identifier = f"{database}.{table}"
         self.logger.info("Removing entry from debezium_signal table", database=database, table=table)
         try:
-            self.run_query(query, [database, table_identifier], database=database)
+            self.run_query(query, [database, table_identifier], database=self.database)
             self.logger.info("Entry removed successfully from debezium_signal table", database=database, table=table)
         except Exception as e:
             self.logger.error("Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
             raise
+        
+    def clear_yugabyte_table(self, database: str, table_info: TableInfo):
+        try:
+            with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(f"TRUNCATE TABLE {table_info.table}")
+                conn.commit()
+        finally:
+            conn.close()
+
+    def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
+        try:
+            with self.connect(database) as conn, conn.cursor() as cursor:
+                # Assuming the table has columns matching the BigQuery table
+                columns = ", ".join(data[0].keys())
+                values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
+            query = f"INSERT INTO {table_info.table} ({columns}) VALUES ({values_placeholder})"
+            # execute_batch(cursor, query, data)
+            conn.commit()
+        finally:
+            conn.close()

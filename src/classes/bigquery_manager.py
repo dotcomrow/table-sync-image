@@ -70,3 +70,9 @@ class BigQueryManager:
         except Exception as e:
             self.logger.warning("Table does not exist", dataset_id=dataset_id, table_id=table_id, error=str(e))
             return False
+
+    def fetch_bigquery_data(self, table_info: TableInfo):
+        self._initialize_client()
+        query = f"SELECT * FROM `{table_info.bq_dataset}.{table_info.bq_table}`"
+        query_job = self.client.query(query)
+        return [dict(row) for row in query_job]
