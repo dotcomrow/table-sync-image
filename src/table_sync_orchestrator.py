@@ -152,7 +152,7 @@ class TableSyncOrchestrator:
                     # so this could be a new build of the platform.
                     # what we need to do in this case is to pull the data from bigquery into the yugabyte table
                     # and then setup the connectors to catch new changes
-                    
+                    self.logger.info("Table does not have entry in debezium signal table, checking BigQuery", table=table_info.table)
                     bigquery_exists = self.bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table)
                     if bigquery_exists:
                         self.logger.info("BigQuery table already exists, need to backfill data into YugabyteDB", table=table_info.table, bq_table=table_info.bq_table)
@@ -163,7 +163,10 @@ class TableSyncOrchestrator:
                             self.logger.info("Backfill from BigQuery to YugabyteDB completed", table=table_info.table)
                         except Exception as e:
                             self.logger.error("Error during backfill from BigQuery", table=table_info.table, error=str(e))
+                    else:
+                        self.logger.info("BigQuery table does not exist, proceeding to set up connectors", table=table_info.table)
                     
+                    self.logger.info("Table does not have entry in debezium signal table, checking connectors", table=table_info.table)
                     connector_statuses = self.kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source'] or not connector_statuses['sink']:
                         try:
