@@ -328,10 +328,19 @@ class YugabyteDBManager:
                 values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
                 query = f"INSERT INTO {table_info.schema}.{table_info.table} ({columns}) VALUES ({values_placeholder})"
 
-                # Convert dictionary values to JSON strings
+                # Fetch column types from the database
+                column_types_query = f"""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s;
+                """
+                cursor.execute(column_types_query, (table_info.schema, table_info.table))
+                column_types = {row[0]: row[1] for row in cursor.fetchall()}
+
+                # Convert dictionary values to JSON strings only for JSON/JSONB columns
                 for row in data:
                     for key, value in row.items():
-                        if isinstance(value, dict):
+                        if isinstance(value, dict) and column_types.get(key) in ("json", "jsonb"):
                             row[key] = json.dumps(value)
 
                 # Use execute_batch for better performance with large volumes of data
