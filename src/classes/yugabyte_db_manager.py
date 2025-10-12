@@ -1,5 +1,4 @@
-from asyncio import subprocess
-from multiprocessing.dummy import connection
+import subprocess
 import psycopg2
 from typing import Any, List
 import re

@@ -2,7 +2,6 @@ import requests
 import re
 import subprocess
 import os
-from typing import Optional
 import json
 import time
 import structlog
