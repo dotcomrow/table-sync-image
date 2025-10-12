@@ -15,12 +15,12 @@ class TableInfo:
 
     @property
     def bq_dataset(self) -> Optional[str]:
-        if self.annotation and self.annotation.bq_target and "." in self.annotation.bq_target:
-            return self.annotation.bq_target.split(".", 1)[0]
+        if self.annotation and self.annotation.bq_dataset:
+            return self.annotation.bq_dataset
         return None
 
     @property
     def bq_table(self) -> Optional[str]:
-        if self.annotation and self.annotation.bq_target and "." in self.annotation.bq_target:
-            return self.annotation.bq_target.split(".", 1)[1]
+        if self.annotation and self.annotation.bq_table:
+            return self.annotation.bq_table
         return None
