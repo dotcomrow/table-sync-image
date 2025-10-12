@@ -167,7 +167,9 @@ class TableSyncOrchestrator:
                     self.bigquery_manager.delete_table(table_info)
                 except Exception as e:
                     self.logger.error("Error tearing down connectors", table=table, error=str(e))
-                                    
+
+    # ----------------------------- Main Loop -----------------------------
+
     def start(self):
         self.logger.info("Starting orchestrator")
         self.running = True
