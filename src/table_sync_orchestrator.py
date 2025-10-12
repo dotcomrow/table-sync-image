@@ -97,7 +97,7 @@ class TableSyncOrchestrator:
         
     # ------------------------------ Helper functions ------------------------------
     
-    def getTableInfoForTable(table: str, tables: List[TableInfo]) -> Optional[TableInfo]:
+    def getTableInfoForTable(self, table: str, tables: List[TableInfo]) -> Optional[TableInfo]:
         for t in tables:
             if t.table == table:
                 return t

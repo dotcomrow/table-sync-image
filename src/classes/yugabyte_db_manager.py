@@ -1,6 +1,6 @@
 import subprocess
 import psycopg2
-from typing import Any, List
+from typing import Any, List, Dict
 import re
 import os
 import json
@@ -348,6 +348,9 @@ class YugabyteDBManager:
                                 self.logger.warning("Unexpected dict value for non-JSON column", column=key, value=value)
                                 row[key] = str(value)  # Fallback to string conversion
 
+                self.logger.info("Unwrapping 'id' fields in data")
+                data = self.unwrap_id_field(data)
+
                 self.logger.debug("Data prepared for insertion", data=data)
 
                 # Use execute_batch for better performance with large volumes of data
@@ -361,3 +364,10 @@ class YugabyteDBManager:
             raise
         finally:
             conn.close()
+
+    def unwrap_id_field(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Unwrap the 'id' field in the data if it is in the format {'id': value}."""
+        for row in data:
+            if 'id' in row and isinstance(row['id'], dict) and 'id' in row['id']:
+                row['id'] = row['id']['id']
+        return data
