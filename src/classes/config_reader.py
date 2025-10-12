@@ -6,10 +6,8 @@ from typing import Dict, Any
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 
+# Section names
 class ConfigKeys(Enum):
-    SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
-    COMPREHENSIVE_DATABASE_SCAN = "comprehensive_database_scan"
-    EXCLUDED_DATABASES = "excluded_databases"
     YUGABYTEDB = "yugabytedb"
     BIGQUERY = "bigquery"
     KAFKA_CONNECT = "kafka_connect"
@@ -17,15 +15,6 @@ class ConfigKeys(Enum):
     HEALTH_CHECK = "health_check"
     METRICS = "metrics"
     PROCESSING = "processing"
-    BIGQUERY_CREDENTIALS_PATH = "bigquery.credentials_path"
-    YUGABYTEDB_MASTER_ADDRESSES = "yugabytedb.master_addresses"
-    YUGABYTEDB_YB_ADMIN_PATH = "yugabytedb.yb_admin_path"
-    YB_ADMIN_PATH = "yb_admin_path"
-    CDC_STREAM_ID = "cdc_stream_id"
-    ALLOW_YB_ADMIN = "allow_yb_admin"
-    KAFKA_CONNECT_URL = "kafka_connect.url"
-    DATABASE_MASTER_ADDRESSES = "database.master.addresses"
-    MOCK = "mock"
     
 class YugabyteDBKeys(Enum):
     MASTER_ADDRESSES = "master_addresses"
@@ -36,24 +25,20 @@ class YugabyteDBKeys(Enum):
     PASSWORD = "password"
     DATABASE = "database"
     MOCK = "mock"
+    EXCLUDED_DATABASES = "excluded_databases"
     
 class BigQueryKeys(Enum):
-    DATASET = "dataset"
     CREDENTIALS_PATH = "credentials_path"
-    DEFAULT_BACKUP_DATASET = "default_backup_dataset"
     MOCK = "mock"
     
 class KafkaConnectKeys(Enum):
     URL = "url"
     SCHEMA_REGISTRY_URL = "schema_registry_url"
-    RECREATE_FAILED_CONNECTORS = "recreate_failed_connectors"
     MOCK = "mock"
     BOOTSTRAP = "bootstrap"
     
 class LoggingKeys(Enum):
     LEVEL = "level"
-    FORMAT = "format"
-    LOG_BODIES_ON_FAILURE = "log_http_bodies_on_failure"
     
 class HealthCheckKeys(Enum):
     ENABLED = "enabled"
@@ -64,10 +49,6 @@ class MetricsKeys(Enum):
     PORT = "port"
     
 class ProcessingKeys(Enum):
-    MAX_WORKERS = "max_workers"
-    BATCH_SIZE = "batch_size"
-    MAX_RETRIES = "max_retries"
-    RETRY_DELAY_SECONDS = "retry_delay_seconds"
     MAX_SCAN_THREADS = "max_scan_threads"
 
 class ConfigReader:

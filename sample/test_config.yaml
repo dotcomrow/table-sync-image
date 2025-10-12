@@ -1,9 +1,3 @@
-scan_interval_seconds: 30
-comprehensive_database_scan: true
-excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
-max_scan_threads: 10
-mock: false
-
 yugabytedb:
   mock: false
   host: yugabytedb  # Corrected hostname for YugabyteDB
@@ -12,23 +6,20 @@ yugabytedb:
   password: yugabyte
   database: testdb
   master_addresses: "yugabytedb:7100"  # Corrected master address
+  excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
 
 bigquery:
   mock: false
   credentials_path: /vault/secrets/gcp-key.json
-  location: US
 
 kafka_connect:
   mock: false
   url: http://kafka_connect:8083  # Updated to match the Kafka Connect service name
   schema_registry_url: http://schema-registry:8081
-  recreate_failed_connectors: true
   bootstrap: kafka:9092  # Corrected bootstrap server for Kafka
 
 logging:
   level: DEBUG
-  format: json
-  log_http_bodies_on_failure: true
 
 health_check:
   port: 8080

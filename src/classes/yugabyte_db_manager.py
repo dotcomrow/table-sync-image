@@ -88,7 +88,7 @@ class YugabyteDBManager:
     # ----------------------------- Discovery -----------------------------
 
     def _discover_databases(self) -> List[str]:
-        excluded = self.config.get(ConfigKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
+        excluded = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
         return self.discover_databases(excluded)
 
     def discover_databases(self, excluded: List[str] = None) -> List[str]:
