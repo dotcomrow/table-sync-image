@@ -268,6 +268,7 @@ class YugabyteDBManager:
                     public.debezium_signal;
             """, database=self.database)
             for entry in entries:
+                self.logger.info("Entry", entry=entry)
                 self.logger.info("Removing CDC stream for entry", database=entry.table_database, table=entry.table_name)
                 try:
                     self.delete_stream(self.find_stream_for_database(entry.table_database))
