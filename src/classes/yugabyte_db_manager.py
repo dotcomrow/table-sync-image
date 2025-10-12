@@ -336,12 +336,19 @@ class YugabyteDBManager:
                 """
                 cursor.execute(column_types_query, (table_info.schema, table_info.table))
                 column_types = {row[0]: row[1] for row in cursor.fetchall()}
+                self.logger.debug("Column types fetched", column_types=column_types)
 
                 # Convert dictionary values to JSON strings only for JSON/JSONB columns
                 for row in data:
                     for key, value in row.items():
-                        if isinstance(value, dict) and column_types.get(key) in ("json", "jsonb"):
-                            row[key] = json.dumps(value)
+                        if isinstance(value, dict):
+                            if column_types.get(key) in ("json", "jsonb"):
+                                row[key] = json.dumps(value)
+                            else:
+                                self.logger.warning("Unexpected dict value for non-JSON column", column=key, value=value)
+                                row[key] = str(value)  # Fallback to string conversion
+
+                self.logger.debug("Data prepared for insertion", data=data)
 
                 # Use execute_batch for better performance with large volumes of data
                 execute_batch(cursor, query, data)

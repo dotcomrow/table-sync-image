@@ -26,9 +26,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import List, Optional
 
 import structlog
 from flask import Flask, jsonify
+from classes.table_info import TableInfo
 
 from classes.kafka_connector import KafkaConnector
 from classes.bigquery_manager import BigQueryManager
@@ -92,6 +94,14 @@ class TableSyncOrchestrator:
 
         threading.Thread(target=run_server, daemon=True).start()
         self.logger.info("Health server started", port=(self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
+        
+    # ------------------------------ Helper functions ------------------------------
+    
+    def getTableInfoForTable(table: str, tables: List[TableInfo]) -> Optional[TableInfo]:
+        for t in tables:
+            if t.table == table:
+                return t
+        return None
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
@@ -168,7 +178,7 @@ class TableSyncOrchestrator:
         # For tables in the database check entries in the signal table for tables in database
         # Fetch all signal table entries for database and verify that annotation is still enabled for each
         for table in self.yugabyte_manager.fetch_tables_in_debezium_signal(db):
-            table_info = next((t for t in tables if t.table == table))
+            table_info = self.getTableInfoForTable(table, tables)
             if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
                 self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
                 try:
