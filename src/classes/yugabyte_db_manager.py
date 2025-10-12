@@ -186,8 +186,28 @@ class YugabyteDBManager:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
             raise RuntimeError(f"Failed to insert record into debezium_signal table: {e}")
 
+    def table_exists(self, database: str, table_name: str, schema: str) -> bool:
+        query = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = %s
+            AND table_name = %s
+        );
+        """
+        try:
+            result = self.run_query(query, [schema, table_name], database=database)
+            return result[0][0] if result else False
+        except Exception as e:
+            self.logger.error("Failed to check if table exists", table=table_name, error=str(e))
+            raise
+    
     def create_debezium_signal_table(self):
         """Create the debezium_signal table if it does not exist."""
+        if self.table_exists(self.database, 'debezium_signal', 'public'):
+            self.logger.info("debezium_signal table already exists, clearing table")
+            self.run_query(query="TRUNCATE TABLE public.debezium_signal;", database=self.database)
+        
         query = """
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
             id   text PRIMARY KEY,

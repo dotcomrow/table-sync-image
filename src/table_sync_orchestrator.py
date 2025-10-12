@@ -216,7 +216,7 @@ class TableSyncOrchestrator:
             self.logger.info("Starting table sync loop")
             try:
                 while self.running:
-                    start = time.time()
+                    start = time.time()                    
                     self.logger.info("Beginning processing")
                     try:
                         # Discover databases and create connectors as needed
