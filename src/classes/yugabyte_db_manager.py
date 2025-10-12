@@ -131,48 +131,7 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
-    
-    def find_stream_for_database(self, database: str) -> str:
-        """Find the CDC stream ID for a given database."""
-        self.logger.info("Finding CDC stream for database", database=database)
-
-        master_addrs = (
-            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
-            or os.getenv("YB_MASTER_ADDRESSES")
-        )
-        if not master_addrs:
-            self.logger.error("Master addresses not configured")
-            raise ValueError("Master addresses not configured")
-
-        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
-        namespace = f"ysql.{database}"
-        self.logger.debug("yb-admin binary and namespace resolved", yb_admin_bin=yb_admin_bin, namespace=namespace)
-
-        try:
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams", namespace],
-                text=True, stderr=subprocess.STDOUT, timeout=20
-            )
-            self.logger.debug("yb-admin list_change_data_streams output", output=out)
-
-            # Process the output to extract the stream ID
-            lines = out.splitlines()
-            for line in lines:
-                if "CDC Stream ID:" in line:
-                    match = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", line, re.I)
-                    if match:
-                        stream_id = match.group(1)
-                        self.logger.info("Found CDC stream ID", stream_id=stream_id)
-                        return stream_id
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error("Failed to list CDC streams", error=str(e))
-            raise RuntimeError(f"Failed to list CDC streams: {e}")
-
-        self.logger.error("No CDC stream found for the database", database=database)
-        raise RuntimeError("No CDC stream found for the database")
-
-    
+        
     def delete_stream(self, stream_id: str):
         """Delete a CDC stream using yb-admin."""
         self.logger.info("Deleting CDC stream", stream_id=stream_id)
@@ -279,15 +238,16 @@ class YugabyteDBManager:
             entries = self.run_query("""
                 SELECT 
                     table_database, 
-                    jsonb_array_elements_text(data->'data-collections') AS table_name 
+                    jsonb_array_elements_text(data->'data-collections') AS table_name,
+                    stream_id
                 FROM 
                     public.debezium_signal;
             """, database=self.database)
             for entry in entries:
                 self.logger.info("Entry", entry=entry)
-                self.logger.info("Removing CDC stream for entry", database=entry[0], table=entry[1])
+                self.logger.info("Removing CDC stream for entry", database=entry[0], table=entry[1], stream_id=entry[2])
                 try:
-                    self.delete_stream(self.find_stream_for_database(entry[0]))
+                    self.delete_stream(entry[2])
                 except Exception as e:
                     self.logger.error("Failed to delete CDC stream for entry", database=entry[0], table=entry[1], error=str(e))
 
