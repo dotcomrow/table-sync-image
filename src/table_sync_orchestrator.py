@@ -154,7 +154,17 @@ class TableSyncOrchestrator:
                             self.kafka_connector.setup_connectors(table_info)
                         except Exception as e:
                             self.logger.error("Error setting up connectors", table=table_info.table, error=str(e))
-                    
+            else:
+                self.logger.info("Table not annotated or annotation disabled, check debezium signal table to see if entry exists", table=table_info.table)
+                if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                    self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table_info.table)
+                    try:
+                        self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+                        self.kafka_connector.reset_connectors(table_info)
+                        self.bigquery_manager.delete_table(table_info)
+                    except Exception as e:
+                        self.logger.error("Error tearing down connectors", table=table_info.table, error=str(e))
+                        
         # For tables in the database check entries in the signal table for tables in database
         # Fetch all signal table entries for database and verify that annotation is still enabled for each
         for table in self.yugabyte_manager.fetch_tables_in_debezium_signal(db):
