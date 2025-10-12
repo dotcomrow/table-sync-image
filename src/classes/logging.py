@@ -1,7 +1,7 @@
 import logging
 import structlog
 from classes.config_reader import ConfigKeys, LoggingKeys
-import enum, logging
+import enum
 
 class Logging:
     class LogLevel(enum.IntEnum):
@@ -13,7 +13,7 @@ class Logging:
     
     def _init_logger(self) -> structlog.BoundLogger:
         lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
-        numeric = getattr(logging, lvl, logging.INFO)
+        numeric = getattr(logging, lvl, self.LogLevel.INFO)
         structlog.configure(
             processors=[
                 structlog.processors.TimeStamper(fmt="iso"),
@@ -27,11 +27,11 @@ class Logging:
         return structlog.get_logger("table_sync_orchestrator")
 
     def logMessage(self, level: LogLevel, message: str, **kwargs):
-        if level == Logging.LogLevel.DEBUG:
+        if level == self.LogLevel.DEBUG:
             self.logger.debug(message, **kwargs)
-        elif level == Logging.LogLevel.INFO:
+        elif level == self.LogLevel.INFO:
             self.logger.info(message, **kwargs)
-        elif level == Logging.LogLevel.WARNING:
+        elif level == self.LogLevel.WARNING:
             self.logger.warning(message, **kwargs)
-        elif level == Logging.LogLevel.ERROR:
+        elif level == self.LogLevel.ERROR:
             self.logger.error(message, **kwargs)
