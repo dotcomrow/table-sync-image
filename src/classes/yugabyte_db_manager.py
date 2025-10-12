@@ -368,6 +368,12 @@ class YugabyteDBManager:
                 values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
                 query = f"INSERT INTO {table_info.schema}.{table_info.table} ({columns}) VALUES ({values_placeholder})"
 
+                # Convert dictionary values to JSON strings
+                for row in data:
+                    for key, value in row.items():
+                        if isinstance(value, dict):
+                            row[key] = json.dumps(value)
+
                 # Use execute_batch for better performance with large volumes of data
                 execute_batch(cursor, query, data)
 
