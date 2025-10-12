@@ -50,6 +50,7 @@ class MetricsKeys(Enum):
     
 class ProcessingKeys(Enum):
     MAX_SCAN_THREADS = "max_scan_threads"
+    SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
 
 class ConfigReader:
     def __init__(self, config_path):

@@ -233,7 +233,7 @@ class TableSyncOrchestrator:
                     finally:
                         elapsed = time.time() - start
                         self.logger.info("Scan loop complete", elapsed_time=elapsed)
-                        time.sleep(max(0, self.config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value, 10) - elapsed))
+                        time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
             except Exception as e:
                 self.logger.error("Unexpected error in table sync loop", error=str(e))
             finally:

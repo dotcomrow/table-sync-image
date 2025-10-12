@@ -30,3 +30,4 @@ metrics:
 
 processing:
   max_scan_threads: 4
+  scan_interval_seconds: 30
