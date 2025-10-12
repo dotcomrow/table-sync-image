@@ -198,7 +198,7 @@ class TableSyncOrchestrator:
         # For tables in the database check entries in the signal table for tables in database
         # Fetch all signal table entries for database and verify that annotation is still enabled for each
         for table in self.yugabyte_manager.fetch_tables_in_debezium_signal(db):
-            table_info = next((t for t in tables if t.table == table), None)
+            table_info = next((t for t in tables if t.table == table))
             if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
                 self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
                 try:
