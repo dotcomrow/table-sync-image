@@ -267,7 +267,7 @@ class YugabyteDBManager:
         self.logger.info("Clearing YugabyteDB table", database=database, table=table_info.table)
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table}")
+                cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table} CASCADE")
                 conn.commit()
         finally:
             conn.close()
