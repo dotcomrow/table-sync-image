@@ -169,9 +169,13 @@ class TableSyncOrchestrator:
                 if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
                     self.logger.info("Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table_info.table)
                     try:
+                        self.logger.info("Tearing down connectors and removing from signal table", table=table_info.table)
                         self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+                        self.logger.info("Removed entry from debezium signal table", table=table_info.table)
                         self.kafka_connector.reset_connectors(table_info)
+                        self.logger.info("Connectors reset successfully", table=table_info.table)
                         self.bigquery_manager.delete_table(table_info)
+                        self.logger.info("BigQuery table deleted successfully", table=table_info.table)
                     except Exception as e:
                         self.logger.error("Error tearing down connectors", table=table_info.table, error=str(e))
                         

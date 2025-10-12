@@ -76,7 +76,7 @@ class YugabyteDBManager:
                     self.logger.info("Query executed successfully", result=result)
                     return result
                 connection.commit()
-                self.logger.info("Query committed successfully")
+                self.logger.info("Query committed successfully", query=query, params=params)
         except Exception as e:
             self.logger.error("Failed to execute query", query=query, error=str(e))
             raise RuntimeError(f"Failed to execute query: {e}")
