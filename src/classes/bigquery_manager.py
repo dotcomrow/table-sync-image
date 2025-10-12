@@ -77,4 +77,5 @@ class BigQueryManager:
         query = f"SELECT * FROM `{table_info.bq_dataset}.{table_info.bq_table}`"
         self.logger.info("Executing BigQuery", query=query)
         query_job = self.client.query(query)
+        self.logger.info("Query executed successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, total_rows=query_job.result().total_rows)
         return [dict(row) for row in query_job]

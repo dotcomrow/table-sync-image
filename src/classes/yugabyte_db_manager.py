@@ -264,14 +264,17 @@ class YugabyteDBManager:
             raise
         
     def clear_yugabyte_table(self, database: str, table_info: TableInfo):
+        self.logger.info("Clearing YugabyteDB table", database=database, table=table_info.table)
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(f"TRUNCATE TABLE {table_info.table}")
                 conn.commit()
         finally:
             conn.close()
+            self.logger.info("YugabyteDB table cleared", database=database, table=table_info.table)
 
     def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
+        self.logger.info("Inserting data into YugabyteDB", database=database, table=table_info.table, row_count=len(data))
         try:
             with self.connect(database) as conn, conn.cursor() as cursor:
                 # Assuming the table has columns matching the BigQuery table
@@ -283,6 +286,8 @@ class YugabyteDBManager:
                 execute_batch(cursor, query, data)
 
                 conn.commit()
+                
+            self.logger.info("Data inserted successfully into YugabyteDB", database=database, table=table_info.table)
         except Exception as e:
             self.logger.error("Failed to insert data into Yugabyte", error=str(e))
             raise
