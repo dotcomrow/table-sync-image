@@ -132,6 +132,58 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.error("Failed to discover tables", database=database, error=str(e))
         return out
+    
+    def find_stream_for_database(self, database: str) -> str:
+        """Find the CDC stream ID for a given database."""
+        self.logger.info("Finding CDC stream for database", database=database)
+        try:
+            with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                sql_query = """
+                    SELECT stream_id, source_namespace
+                    FROM yb_cdc_streams
+                    WHERE source_namespace = %s;
+                """
+                namespace = f"ysql.{database}"
+                self.logger.debug("Executing SQL query to find CDC stream", query=sql_query, params=(namespace,))
+                cur.execute(sql_query, (namespace,))
+                rows = cur.fetchall()
+                self.logger.debug("SQL query executed successfully", row_count=len(rows), rows=rows)
+                for row in rows:
+                    if row['source_namespace'] == namespace:
+                        self.logger.info("Found CDC stream for table", stream_id=row['stream_id'], source_namespace=row['source_namespace'])
+                        return row['stream_id']
+                    
+        except Exception as e:
+            self.logger.error("Failed to find CDC stream for table", database=database, error=str(e))
+        self.logger.info("No CDC stream found for table", database=database)
+        return ""
+    
+    def delete_stream(self, stream_id: str):
+        """Delete a CDC stream using yb-admin."""
+        self.logger.info("Deleting CDC stream", stream_id=stream_id)
+
+        master_addrs = (
+            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
+            or os.getenv("YB_MASTER_ADDRESSES")
+        )
+        if not master_addrs:
+            self.logger.error("Master addresses not configured")
+            raise ValueError("Master addresses not configured")
+
+        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
+        self.logger.debug("yb-admin binary resolved", yb_admin_bin=yb_admin_bin)
+
+        try:
+            out = subprocess.check_output(
+                [yb_admin_bin, "--master_addresses", master_addrs, "delete_change_data_stream", stream_id],
+                text=True, stderr=subprocess.STDOUT, timeout=20
+            )
+            self.logger.debug("yb-admin delete_change_data_stream output", output=out)
+            self.logger.info("Deleted CDC stream ID", stream_id=stream_id)
+        except subprocess.CalledProcessError as e:
+            self.logger.error("Failed to delete CDC stream", error=str(e))
+            raise RuntimeError(f"Failed to delete CDC stream: {e}")
+
 
     def create_stream(self, database_name: str) -> str:
         """Create a CDC stream for a given database using yb-admin."""
@@ -170,17 +222,18 @@ class YugabyteDBManager:
     def insert_debezium_signal(self, table_info: TableInfo):
         """Insert a record into the public.debezium_signal table."""
         query = """
-        INSERT INTO public.debezium_signal (id, type, data)
+        INSERT INTO public.debezium_signal (id, type, data, table_database)
         VALUES (
           %s,
           'execute-snapshot',
+          %s,
           %s
         );
         """
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
         self.logger.info("Inserting record into debezium_signal table", table_name=table_info.table, data=data)
         try:
-            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data], database=self.database)
+            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database], database=self.database)
             self.logger.info("Record inserted successfully", table_name=table_info.table)
         except Exception as e:
             self.logger.error("Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
@@ -206,6 +259,21 @@ class YugabyteDBManager:
     def create_debezium_signal_table(self):
         """Create the debezium_signal table if it does not exist."""
         if self.table_exists(self.database, 'debezium_signal', 'public'):
+            self.logger.info("debezium_signal table exists, fetching previous entries to clear streams")
+            entries = self.run_query("""
+                SELECT 
+                    table_database, 
+                    jsonb_array_elements_text(data->'data-collections') AS table_name 
+                FROM 
+                    public.debezium_signal;
+            """, database=self.database)
+            for entry in entries:
+                self.logger.info("Removing CDC stream for entry", database=entry['table_database'], table=entry['table_name'])
+                try:
+                    self.delete_stream(self.find_stream_for_database(entry['table_database']))
+                except Exception as e:
+                    self.logger.error("Failed to delete CDC stream for entry", database=entry['table_database'], table=entry['table_name'], error=str(e))
+                    
             self.logger.info("debezium_signal table already exists, clearing table")
             self.run_query(query="TRUNCATE TABLE public.debezium_signal;", database=self.database)
         
