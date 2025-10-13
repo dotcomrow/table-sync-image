@@ -96,6 +96,7 @@ class TableSyncOrchestrator:
         logger.logMessage(Logging.LogLevel.INFO, "Tables discovered", database=db, tables=[t.table for t in tables])
 
         for table_info in tables:
+            logger.logMessage(Logging.LogLevel.INFO, "Processing table", table=table_info.table)
             # for each table in the database check if it has annotation enabled
             if table_info.annotation is not None and table_info.annotation.enabled:
                 # Check to see if table has entry in debezium signal table
