@@ -135,19 +135,10 @@ class Logging:
             # Initialize the client with explicit credentials and project
             client = cloud_logging.Client(credentials=credentials, project=project_id)
             
-            # Test authentication by attempting to list log entries (limit to 1 to minimize overhead)
-            try:
-                # This will raise an exception if authentication fails
-                entries = list(client.list_entries(max_results=1))
-                print(f"✅ Google Cloud Logging initialized successfully")
-                print(f"📁 Project: {project_id}")
-                print(f"🔑 Service Account: {credentials.service_account_email}")
-            except Exception as auth_e:
-                print(f"❌ Google Cloud Logging authentication failed: {auth_e}")
-                print(f"🔍 Project ID: {project_id}")
-                print(f"📧 Service Account: {credentials.service_account_email}")
-                print("Cloud logging will be disabled. Check your service account permissions.")
-                return None
+            # No authentication test needed - will be validated on first write operation
+            print(f"✅ Google Cloud Logging client initialized")
+            print(f"� Project: {project_id}")
+            print(f"� Service Account: {credentials.service_account_email}")
                 
             return client
         except Exception as e:
