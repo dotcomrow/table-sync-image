@@ -91,16 +91,16 @@ class TableSyncOrchestrator:
         
         try:
             if yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                logger.logMessage(Logging.LogLevel.DEBUG, "Tearing down connectors and removing from signal table", table=table_info)
+                logger.logMessage(Logging.LogLevel.DEBUG, "Tearing down connectors and removing from signal table", table=table_info.to_dict())
                 yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
             if kafka_connector.check_connector_exists(table_info)['source_exists'] or kafka_connector.check_connector_exists(table_info)['sink_exists']:
                 kafka_connector.reset_connectors(table_info)
-                logger.logMessage(Logging.LogLevel.DEBUG, "Connectors reset successfully", table=table_info)
+                logger.logMessage(Logging.LogLevel.DEBUG, "Connectors reset successfully", table=table_info.to_dict())
             if table_info.bq_dataset and table_info.bq_table and bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
                 bigquery_manager.delete_table(table_info)
-                logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table deleted successfully", table=table_info)
+                logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table deleted successfully", table=table_info.to_dict())
         except Exception as e:
-            logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info, error=str(e))
+            logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.to_dict(), error=str(e))
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
@@ -115,7 +115,7 @@ class TableSyncOrchestrator:
         logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables])
 
         for table_info in tables:
-            logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info)
+            logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info.to_dict())
             # for each table in the database check if it has annotation enabled
             if table_info.annotation is not None and table_info.annotation.enabled:
                 # Check to see if table has entry in debezium signal table
@@ -128,54 +128,54 @@ class TableSyncOrchestrator:
                     # so this could be a new build of the platform.
                     # what we need to do in this case is to pull the data from bigquery into the yugabyte table
                     # and then setup the connectors to catch new changes
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking BigQuery", table=table_info)
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking BigQuery", table=table_info.to_dict())
                     bigquery_exists = bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table)
                     if bigquery_exists:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table already exists, need to backfill data into YugabyteDB", table=table_info, bq_table=table_info.bq_table)
+                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table already exists, need to backfill data into YugabyteDB", table=table_info.to_dict(), bq_table=table_info.bq_table)
                         # Here you would implement the logic to backfill data from BigQuery to YugabyteDB
                         # This is a placeholder for the actual backfill logic
                         try:
                             bigquery_data = bigquery_manager.fetch_bigquery_data(table_info)
-                            logger.logMessage(Logging.LogLevel.DEBUG, "Fetched data from BigQuery", table=table_info, row_count=len(bigquery_data))
+                            logger.logMessage(Logging.LogLevel.DEBUG, "Fetched data from BigQuery", table=table_info.to_dict(), row_count=len(bigquery_data))
                             yugabyte_manager.clear_yugabyte_table(db, table_info)
-                            logger.logMessage(Logging.LogLevel.DEBUG, "Cleared YugabyteDB table before backfill", database=db, table=table_info)
+                            logger.logMessage(Logging.LogLevel.DEBUG, "Cleared YugabyteDB table before backfill", database=db, table=table_info.to_dict())
                             yugabyte_manager.insert_into_yugabyte(bigquery_data, db, table_info)
-                            logger.logMessage(Logging.LogLevel.DEBUG, "Backfill from BigQuery to YugabyteDB completed", table=table_info)
+                            logger.logMessage(Logging.LogLevel.DEBUG, "Backfill from BigQuery to YugabyteDB completed", table=table_info.to_dict())
                         except Exception as e:
-                            logger.logMessage(Logging.LogLevel.ERROR, "Error during backfill from BigQuery", table=table_info, error=str(e))
+                            logger.logMessage(Logging.LogLevel.ERROR, "Error during backfill from BigQuery", table=table_info.to_dict(), error=str(e))
                     else:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table does not exist, proceeding to set up connectors", table=table_info)
+                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table does not exist, proceeding to set up connectors", table=table_info.to_dict())
                     
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking connectors", table=table_info)
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking connectors", table=table_info.to_dict())
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
                         try:
                             kafka_connector.setup_connectors(table_info)
                         except Exception as e:
-                            logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info, error=str(e))
+                            logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info.to_dict(), error=str(e))
                     else:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Connectors already exist for table, resetting and rebuilding", table=table_info)
+                        logger.logMessage(Logging.LogLevel.DEBUG, "Connectors already exist for table, resetting and rebuilding", table=table_info.to_dict())
                         try:
                             kafka_connector.reset_connectors(table_info)
                             kafka_connector.setup_connectors(table_info)
                         except Exception as e:
-                            logger.logMessage(Logging.LogLevel.ERROR, "Error resetting connectors", table=table_info, error=str(e))
+                            logger.logMessage(Logging.LogLevel.ERROR, "Error resetting connectors", table=table_info.to_dict(), error=str(e))
                 else:
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Table already has entry in debezium signal table, check if connectors are running", table=table_info)
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Table already has entry in debezium signal table, check if connectors are running", table=table_info.to_dict())
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "One or more connectors do not exist, setting up connectors", table=table_info)
+                        logger.logMessage(Logging.LogLevel.DEBUG, "One or more connectors do not exist, setting up connectors", table=table_info.to_dict())
                         try:
                             kafka_connector.reset_connectors(table_info)
                             kafka_connector.setup_connectors(table_info)
                         except Exception as e:
-                            logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info, error=str(e))
+                            logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info.to_dict(), error=str(e))
             else:
                 if (table_info.annotation is not None and not table_info.annotation.enabled):
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled, removing from signal table and tearing down connectors", table=table_info)
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled, removing from signal table and tearing down connectors", table=table_info.to_dict())
                     self.remove_sync_setup(table_info)
                 if table_info.annotation is None:
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation not found, removing anything that might have been previously setup", table=table_info)
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation not found, removing anything that might have been previously setup", table=table_info.to_dict())
                     self.remove_sync_setup(table_info)
                         
         # For tables in the database check entries in the signal table for tables in database

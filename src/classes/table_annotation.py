@@ -26,3 +26,11 @@ class TableAnnotation:
         except Exception as e:
             print(f"Unexpected error in annotation reader: {e}", file=sys.stderr)
             return None
+    
+    def to_dict(self) -> dict:
+        """Convert TableAnnotation to dictionary for logging purposes."""
+        return {
+            "enabled": self.enabled,
+            "bq_dataset": self.bq_dataset,
+            "bq_table": self.bq_table
+        }

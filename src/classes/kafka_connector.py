@@ -28,40 +28,40 @@ class KafkaConnector:
         self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
     
     def delete_sink_cdc_connector(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting sink CDC connector", table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting sink CDC connector", table=table_info.to_dict())
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
             raise ValueError("Kafka Connect URL not configured")
 
         url = f"{kc}/connectors/{sink_connector_name}"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect URL resolved for deletion", url=url, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect URL resolved for deletion", url=url, table=table_info.to_dict())
         response = requests.delete(url)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect response for deletion", status_code=response.status_code, response_text=response.text, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect response for deletion", status_code=response.status_code, response_text=response.text, table=table_info.to_dict())
         if response.status_code not in (200, 204):
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete connector", response_text=response.text, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete connector", response_text=response.text, table=table_info.to_dict())
             raise RuntimeError(f"Failed to delete connector: {response.text}")
 
         self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=sink_connector_name)
 
     def delete_source_cdc_connector(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting source CDC connector", table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting source CDC connector", table=table_info.to_dict())
         source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
             raise ValueError("Kafka Connect URL not configured")
 
         url = f"{kc}/connectors/{source_connector_name}"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect URL resolved for deletion", url=url, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect URL resolved for deletion", url=url, table=table_info.to_dict())
         response = requests.delete(url)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect response for deletion", status_code=response.status_code, response_text=response.text, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect response for deletion", status_code=response.status_code, response_text=response.text, table=table_info.to_dict())
         if response.status_code not in (200, 204):
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete connector", response_text=response.text, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete connector", response_text=response.text, table=table_info.to_dict())
             raise RuntimeError(f"Failed to delete connector: {response.text}")
 
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=source_connector_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=source_connector_name, table=table_info.to_dict())
 
     def get_cdc_stream_id(self, table_info):
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching CDC stream ID", table_info=table_info)
@@ -69,93 +69,93 @@ class KafkaConnector:
             self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
         )
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Master addresses resolved", master_addresses=master_addrs, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Master addresses resolved", master_addresses=master_addrs, table=table_info.to_dict())
         if not master_addrs:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured", table=table_info.to_dict())
             raise ValueError("Master addresses not configured")
 
         yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
         namespace = f"ysql.{table_info.database}"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin binary and namespace resolved", yb_admin_bin=yb_admin_bin, namespace=namespace, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin binary and namespace resolved", yb_admin_bin=yb_admin_bin, namespace=namespace, table=table_info.to_dict())
 
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
                 text=True, stderr=subprocess.STDOUT, timeout=20
             )
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin list_change_data_streams output", output=out, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin list_change_data_streams output", output=out, table=table_info.to_dict())
             match = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
             if match:
                 stream_id = match.group(1)
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Found CDC stream ID", stream_id=stream_id, table=table_info)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Found CDC stream ID", stream_id=stream_id, table=table_info.to_dict())
                 return stream_id
         except subprocess.CalledProcessError as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to list CDC streams", error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to list CDC streams", error=str(e), table=table_info.to_dict())
 
         try:
             out = subprocess.check_output(
                 [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
                 text=True, stderr=subprocess.STDOUT, timeout=20
             )
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin create_change_data_stream output", output=out, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin create_change_data_stream output", output=out, table=table_info.to_dict())
             match = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
             if match:
                 stream_id = match.group(1)
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Created CDC stream ID", stream_id=stream_id, table=table_info)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Created CDC stream ID", stream_id=stream_id, table=table_info.to_dict())
                 return stream_id
         except subprocess.CalledProcessError as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream", error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream", error=str(e), table=table_info.to_dict())
 
-        self.logger.logMessage(Logging.LogLevel.WARNING, "No CDC stream ID found or created", table=table_info)
+        self.logger.logMessage(Logging.LogLevel.WARNING, "No CDC stream ID found or created", table=table_info.to_dict())
         return None
 
     def check_connector_exists(self, table_info: TableInfo) -> bool:
         source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
 
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if Kafka connectors exist", source_connector_name=source_connector_name, sink_connector_name=sink_connector_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if Kafka connectors exist", source_connector_name=source_connector_name, sink_connector_name=sink_connector_name, table=table_info.to_dict())
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
             raise ValueError("Kafka Connect URL not configured")
 
         source_exists = False
         url = f"{kc}/connectors/{source_connector_name}/status"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect status URL", url=url, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect status URL", url=url, table=table_info.to_dict())
         try:
             response = requests.get(url, timeout=10)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect source status response", status_code=response.status_code, response_text=response.text, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect source status response", status_code=response.status_code, response_text=response.text, table=table_info.to_dict())
             source_exists = response.status_code == 200
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Connector source existence check completed", exists=source_exists, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Connector source existence check completed", exists=source_exists, table=table_info.to_dict())
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Exception while checking connector existence", error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Exception while checking connector existence", error=str(e), table=table_info.to_dict())
 
         sink_exists = False
         url = f"{kc}/connectors/{sink_connector_name}/status"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect status URL", url=url, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect status URL", url=url, table=table_info.to_dict())
         try:
             response = requests.get(url, timeout=10)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect sink status response", status_code=response.status_code, response_text=response.text, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect sink status response", status_code=response.status_code, response_text=response.text, table=table_info.to_dict())
             sink_exists = response.status_code == 200
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Connector sink existence check completed", exists=sink_exists, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Connector sink existence check completed", exists=sink_exists, table=table_info.to_dict())
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Exception while checking connector existence", error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Exception while checking connector existence", error=str(e), table=table_info.to_dict())
 
         return {"source_exists": source_exists, "sink_exists": sink_exists}
         
     def reset_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Resetting Kafka connectors for table", table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Resetting Kafka connectors for table", table=table_info.to_dict())
         status = self.check_connector_exists(table_info)
         if status.get("source_exists"):
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector exists, deleting", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector exists, deleting", table=table_info.to_dict())
             self.delete_source_cdc_connector(table_info)
         
         if status.get("sink_exists"):
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector exists, deleting", table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector exists, deleting", table=table_info.to_dict())
             self.delete_sink_cdc_connector(table_info)
         
     def setup_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Setting up Kafka connectors for table", table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Setting up Kafka connectors for table", table=table_info.to_dict())
         self.create_source_connector(table_info)
         self.create_sink_connector(table_info)
         
@@ -169,7 +169,7 @@ class KafkaConnector:
             time.sleep(10)  # Wait for 10 seconds before retrying
         else:
             # Handle timeout case
-            raise TimeoutError("The table did not exist within the 3-minute timeout.", table=table_info)
+            raise TimeoutError("The table did not exist within the 3-minute timeout.", table=table_info.to_dict())
 
 
     def _derive_topic_and_mappings(self, table_info: TableInfo):
@@ -239,10 +239,10 @@ class KafkaConnector:
             "value.converter.auto.register.schemas": "true",
         }
 
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector configuration", source_config=source_config, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector configuration", source_config=source_config, table=table_info.to_dict())
         source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         response = self._send_connector_request(source_connector_name, source_config)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
         # Insert debezium signal record
         self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
 
@@ -257,7 +257,7 @@ class KafkaConnector:
                 if not bq_project:
                     raise ValueError("project_id not found in GCP key file")
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to load project_id from GCP key file", error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to load project_id from GCP key file", error=str(e), table=table_info.to_dict())
             raise
 
         # Derive topic/dataset/table consistently with the source
@@ -313,7 +313,7 @@ class KafkaConnector:
         self.bigquery_manager.create_dataset(table_info)
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
         response = self._send_connector_request(sink_connector_name, sink_config)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector created", response=response, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector created", response=response, table=table_info.to_dict())
 
     def _send_connector_request(self, name: str, config: dict):
         url = f"{self.kc_url}/connectors/{name}/config"

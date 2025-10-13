@@ -37,20 +37,26 @@ class Logging:
         # Clear existing handlers
         standard_logger.handlers.clear()
         
-        # Add console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(numeric)
-        standard_logger.addHandler(console_handler)
-        
-        # Add cloud logging handler if available
+        # Add cloud logging handler if available, otherwise add console handler
         if cloud_logging_client:
             try:
                 cloud_handler = cloud_logging_client.get_default_handler()
                 cloud_handler.setLevel(numeric)
                 standard_logger.addHandler(cloud_handler)
+                print("📤 Logs will be sent to Google Cloud Logging only")
             except Exception as e:
                 print(f"Warning: Failed to initialize Cloud Logging handler: {e}")
                 print("Continuing with console logging only...")
+                # Fallback to console handler if cloud logging fails
+                console_handler = logging.StreamHandler()
+                console_handler.setLevel(numeric)
+                standard_logger.addHandler(console_handler)
+        else:
+            # Add console handler when cloud logging is not available or disabled
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(numeric)
+            standard_logger.addHandler(console_handler)
+            print("📺 Logs will be sent to console only")
         
         structlog.configure(
             processors=[
