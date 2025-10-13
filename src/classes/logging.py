@@ -2,16 +2,18 @@ import structlog
 import enum
 import logging
 from uuid import uuid4
-from typing import Optional
+from typing import Optional, Any
 
-from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys, YugabyteDBKeys
+from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys, BigQueryKeys, YugabyteDBKeys
 
 try:
     from google.cloud import logging as cloud_logging
+    from google.oauth2 import service_account
     CLOUD_LOGGING_AVAILABLE = True
 except ImportError:
     CLOUD_LOGGING_AVAILABLE = False
     cloud_logging = None
+    service_account = None
 
 class Logging:
     class LogLevel(enum.IntEnum):
@@ -42,9 +44,13 @@ class Logging:
         
         # Add cloud logging handler if available
         if cloud_logging_client:
-            cloud_handler = cloud_logging_client.get_default_handler()
-            cloud_handler.setLevel(numeric)
-            standard_logger.addHandler(cloud_handler)
+            try:
+                cloud_handler = cloud_logging_client.get_default_handler()
+                cloud_handler.setLevel(numeric)
+                standard_logger.addHandler(cloud_handler)
+            except Exception as e:
+                print(f"Warning: Failed to initialize Cloud Logging handler: {e}")
+                print("Continuing with console logging only...")
         
         structlog.configure(
             processors=[
@@ -61,7 +67,7 @@ class Logging:
         session_id = str(uuid4())
         return logger.bind(session_id=session_id)
     
-    def _setup_cloud_logging(self) -> Optional:
+    def _setup_cloud_logging(self) -> Optional[Any]:
         """Set up Google Cloud Logging if available and configured."""
         if not CLOUD_LOGGING_AVAILABLE:
             return None
@@ -72,8 +78,30 @@ class Logging:
             if not logging_config.get(LoggingKeys.ENABLE_CLOUD_LOGGING.value, False):
                 return None
             
-            # Initialize the client
-            client = cloud_logging.Client()
+            # Get credentials from BigQuery configuration
+            bigquery_config = self.config.get(ConfigKeys.BIGQUERY.value, {})
+            credentials_path = bigquery_config.get(BigQueryKeys.CREDENTIALS_PATH.value)
+            
+            if not credentials_path:
+                print("Warning: No credentials_path found in BigQuery configuration for Cloud Logging")
+                return None
+            
+            # Load service account credentials
+            credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            
+            # Initialize the client with explicit credentials
+            client = cloud_logging.Client(credentials=credentials)
+            
+            # Test authentication by attempting to list log entries (limit to 1 to minimize overhead)
+            try:
+                # This will raise an exception if authentication fails
+                list(client.list_entries(max_results=1))
+                print(f"✅ Google Cloud Logging initialized successfully using credentials: {credentials_path}")
+            except Exception as auth_e:
+                print(f"Warning: Google Cloud Logging authentication failed: {auth_e}")
+                print("Cloud logging will be disabled. Check your service account credentials.")
+                return None
+                
             return client
         except Exception as e:
             # Fallback to local logging if cloud logging setup fails
