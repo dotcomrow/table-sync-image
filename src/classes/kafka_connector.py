@@ -46,7 +46,7 @@ class KafkaConnector:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=sink_connector_name)
 
     def delete_source_cdc_connector(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting source CDC connector", table=table_info.full_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting source CDC connector", table=table_info)
         source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
