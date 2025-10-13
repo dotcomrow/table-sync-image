@@ -107,22 +107,6 @@ class ConfigReader:
     def validate_config(self, config: Dict[str, Any]):
         errors = []
 
-        # Validate scan_interval_seconds
-        if not isinstance(config.get(ConfigKeys.SCAN_INTERVAL_SECONDS.value), int):
-            errors.append("scan_interval_seconds must be an integer")
-
-        # Validate comprehensive_database_scan
-        if not isinstance(config.get(ConfigKeys.COMPREHENSIVE_DATABASE_SCAN.value), bool):
-            errors.append("comprehensive_database_scan must be a boolean")
-
-        # Validate excluded_databases
-        if not isinstance(config.get(ConfigKeys.EXCLUDED_DATABASES.value), str):
-            errors.append("excluded_databases must be a comma-separated string")
-
-        # Validate max_scan_threads
-        if not isinstance(config.get(ConfigKeys.MAX_SCAN_THREADS.value), int):
-            errors.append("max_scan_threads must be an integer")
-
         # Validate yugabytedb
         yugabytedb = config.get(ConfigKeys.YUGABYTEDB.value, {})
         if not isinstance(yugabytedb, dict):

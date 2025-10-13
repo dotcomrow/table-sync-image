@@ -1,19 +1,19 @@
 import logging
 import structlog
-from classes.config_reader import ConfigKeys, LoggingKeys
 import enum
+from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys
 
 class Logging:
     class LogLevel(enum.IntEnum):
         NOTSET=0; DEBUG=10; INFO=20; WARNING=30; ERROR=40; CRITICAL=50
     
-    def __init__(self, config):
+    def __init__(self, config: ConfigReader):
         self.config = config
         self.logger = self._init_logger()
     
     def _init_logger(self) -> structlog.BoundLogger:
-        lvl = (self.config.get(ConfigKeys.LOGGING.value, {}) or {}).get(LoggingKeys.LEVEL.value, "INFO").upper()
-        numeric = getattr(logging, lvl, self.LogLevel.INFO)
+        lvl = self.config.get(ConfigKeys.LOGGING.value).get(LoggingKeys.LEVEL.value, "INFO").upper()
+        numeric = self.LogLevel[lvl] if lvl in self.LogLevel.__members__ else self.LogLevel.INFO
         structlog.configure(
             processors=[
                 structlog.processors.TimeStamper(fmt="iso"),
@@ -30,8 +30,8 @@ class Logging:
         if level == self.LogLevel.DEBUG:
             self.logger.debug(message, **kwargs)
         elif level == self.LogLevel.INFO:
-            self.logger.info(message, **kwargs)
+            self.logger.logMessage(Logging.LogLevel.INFO, message, **kwargs)
         elif level == self.LogLevel.WARNING:
             self.logger.warning(message, **kwargs)
         elif level == self.LogLevel.ERROR:
-            self.logger.error(message, **kwargs)
+            self.logger.logMessage(Logging.LogLevel.ERROR, message, **kwargs)

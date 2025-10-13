@@ -177,19 +177,19 @@ class TableSyncOrchestrator:
     # ----------------------------- Main Loop -----------------------------
 
     def start(self):
-        self.logger.info("Starting orchestrator")
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting orchestrator")
         self.running = True
-        self.logger.info("Starting processing loop")
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting processing loop")
         try:
-            self.logger.info("Starting table sync loop")
+            self.logger.logMessage(Logging.LogLevel.INFO, "Starting table sync loop")
             try:
                 while self.running:
                     start = time.time()                    
-                    self.logger.info("Beginning processing")
+                    self.logger.logMessage(Logging.LogLevel.INFO, "Beginning processing")
                     try:
                         # Discover databases and create connectors as needed
                         databases = self.yugabyte_manager._discover_databases()
-                        self.logger.info("Databases discovered", databases=databases)
+                        self.logger.logMessage(Logging.LogLevel.INFO, "Databases discovered", databases=databases)
                     
                         with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                             futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
@@ -199,24 +199,24 @@ class TableSyncOrchestrator:
                                 try:
                                     future.result()
                                 except Exception as e:
-                                    self.logger.error("Error in table sync loop", error=str(e))
+                                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", error=str(e))
                         
                     except Exception as e:
-                        self.logger.error("Error during table sync", error=str(e))
+                        self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=str(e))
                     finally:
                         elapsed = time.time() - start
-                        self.logger.info("Scan loop complete", elapsed_time=elapsed)
+                        self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed)
                         time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
             except Exception as e:
-                self.logger.error("Unexpected error in table sync loop", error=str(e))
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in table sync loop", error=str(e))
             finally:
-                self.logger.info("Table sync loop exiting")
+                self.logger.logMessage(Logging.LogLevel.INFO, "Table sync loop exiting")
                             
         except Exception as e:
-            self.logger.error("Unexpected error in orchestrator", error=str(e))
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in orchestrator", error=str(e))
         finally:
             self.running = False
-            self.logger.info("Orchestrator stopped")
+            self.logger.logMessage(Logging.LogLevel.INFO, "Orchestrator stopped")
 
 # ----------------------------- Main Entry -----------------------------
 
