@@ -11,10 +11,10 @@ from classes.yugabyte_db_manager import YugabyteDBManager
 from classes.logging import Logging
 
 class KafkaConnector:
-    def __init__(self, config):
+    def __init__(self, config, logging: Logging):
         self.config = config
         self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
-        self.logger = Logging(self.config)
+        self.logger = logging
         self.schema_registry_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.SCHEMA_REGISTRY_URL.value)
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
         self.host = db_cfg.get(YugabyteDBKeys.HOST.value, 'localhost')
@@ -22,8 +22,8 @@ class KafkaConnector:
         self.user = db_cfg.get(YugabyteDBKeys.USER.value, 'yugabyte')
         self.password = db_cfg.get(YugabyteDBKeys.PASSWORD.value, 'yugabyte')
         self.database = db_cfg.get(YugabyteDBKeys.DATABASE.value, 'yugabyte')
-        self.yugabyte_manager = YugabyteDBManager(config)
-        self.bigquery_manager = BigQueryManager(config)
+        self.yugabyte_manager = YugabyteDBManager(config, logging)
+        self.bigquery_manager = BigQueryManager(config, logging)
         self.db_master_addresses = db_cfg.get(YugabyteDBKeys.MASTER_ADDRESSES.value, None)
         self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
     

@@ -12,7 +12,7 @@ from classes.table_annotation import TableAnnotation
 from classes.logging import Logging
 
 class YugabyteDBManager:
-    def __init__(self, config):
+    def __init__(self, config, logger: Logging):
         self.config = config
         self.mock_enabled=self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False)
         db_cfg = config.get(ConfigKeys.YUGABYTEDB.value, {})
@@ -21,7 +21,7 @@ class YugabyteDBManager:
         self.user = db_cfg.get('user', 'yugabyte')
         self.password = db_cfg.get('password', 'yugabyte')
         self.database = db_cfg.get('database', 'yugabyte')
-        self.logger = Logging(self.config)
+        self.logger = logger
 
     def connect(self, database: str = None):
         if self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False):

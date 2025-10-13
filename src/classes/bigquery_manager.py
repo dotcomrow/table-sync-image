@@ -5,9 +5,9 @@ from classes.table_info import TableInfo
 from classes.logging import Logging
 
 class BigQueryManager:
-    def __init__(self, config):
+    def __init__(self, config, logger: Logging):
         self.config = config
-        self.logger = Logging(self.config)
+        self.logger = logger
         self.client = None  # Initialize client as None
         self.mock_enabled=self.config.get(ConfigKeys.BIGQUERY.value, {}).get(BigQueryKeys.MOCK.value, False)
 
