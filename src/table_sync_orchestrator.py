@@ -96,7 +96,7 @@ class TableSyncOrchestrator:
             if kafka_connector.check_connector_exists(table_info)['source_exists'] or kafka_connector.check_connector_exists(table_info)['sink_exists']:
                 kafka_connector.reset_connectors(table_info)
                 logger.logMessage(Logging.LogLevel.DEBUG, "Connectors reset successfully", table=table_info.table)
-            if bigquery_manager.check_table_exists(table_info):
+            if table_info.bq_dataset and table_info.bq_table and bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
                 bigquery_manager.delete_table(table_info)
                 logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table deleted successfully", table=table_info.table)
         except Exception as e:
