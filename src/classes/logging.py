@@ -86,20 +86,61 @@ class Logging:
                 print("Warning: No credentials_path found in BigQuery configuration for Cloud Logging")
                 return None
             
-            # Load service account credentials
-            credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            print(f"🔍 Attempting to load Cloud Logging credentials from: {credentials_path}")
             
-            # Initialize the client with explicit credentials
-            client = cloud_logging.Client(credentials=credentials)
+            # Check if credentials file exists and is readable
+            import os
+            if not os.path.exists(credentials_path):
+                print(f"❌ Credentials file does not exist: {credentials_path}")
+                return None
+                
+            if not os.access(credentials_path, os.R_OK):
+                print(f"❌ Credentials file is not readable: {credentials_path}")
+                return None
+                
+            try:
+                # Load service account credentials
+                credentials = service_account.Credentials.from_service_account_file(credentials_path)
+                print(f"✅ Loaded service account credentials from {credentials_path}")
+                print(f"📧 Service account email: {credentials.service_account_email}")
+            except Exception as cred_e:
+                print(f"❌ Failed to load service account credentials: {cred_e}")
+                return None
+            
+            # Extract project ID from service account credentials
+            # The project_id should be available in the credentials object
+            project_id = getattr(credentials, 'project_id', None)
+            if not project_id:
+                # Try to read project_id from the JSON file directly
+                import json
+                try:
+                    with open(credentials_path, 'r') as f:
+                        key_data = json.load(f)
+                        project_id = key_data.get('project_id')
+                except Exception as json_e:
+                    print(f"❌ Failed to extract project_id from credentials file: {json_e}")
+                    
+            if not project_id:
+                print("❌ Could not determine project_id from service account credentials")
+                return None
+                
+            print(f"🏗️ Initializing Cloud Logging client for project: {project_id}")
+            
+            # Initialize the client with explicit credentials and project
+            client = cloud_logging.Client(credentials=credentials, project=project_id)
             
             # Test authentication by attempting to list log entries (limit to 1 to minimize overhead)
             try:
                 # This will raise an exception if authentication fails
-                list(client.list_entries(max_results=1))
-                print(f"✅ Google Cloud Logging initialized successfully using credentials: {credentials_path}")
+                entries = list(client.list_entries(max_results=1))
+                print(f"✅ Google Cloud Logging initialized successfully")
+                print(f"📁 Project: {project_id}")
+                print(f"🔑 Service Account: {credentials.service_account_email}")
             except Exception as auth_e:
-                print(f"Warning: Google Cloud Logging authentication failed: {auth_e}")
-                print("Cloud logging will be disabled. Check your service account credentials.")
+                print(f"❌ Google Cloud Logging authentication failed: {auth_e}")
+                print(f"🔍 Project ID: {project_id}")
+                print(f"📧 Service Account: {credentials.service_account_email}")
+                print("Cloud logging will be disabled. Check your service account permissions.")
                 return None
                 
             return client
