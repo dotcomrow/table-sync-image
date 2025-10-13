@@ -20,6 +20,7 @@ kafka_connect:
 
 logging:
   level: DEBUG
+  enable_cloud_logging: false
 
 health_check:
   port: 8080

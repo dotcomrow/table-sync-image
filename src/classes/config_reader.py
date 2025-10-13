@@ -38,6 +38,7 @@ class KafkaConnectKeys(Enum):
     
 class LoggingKeys(Enum):
     LEVEL = "level"
+    ENABLE_CLOUD_LOGGING = "enable_cloud_logging"
     
 class HealthCheckKeys(Enum):
     ENABLED = "enabled"
@@ -113,8 +114,9 @@ class ConfigReader:
                 return
 
             for key in keys_enum:
-                if key.value == "mock":
-                    continue  # Skip validation for the mock property
+                # Skip validation for optional properties
+                if key.value in ["mock", YugabyteDBKeys.EXCLUDED_DATABASES.value]:
+                    continue
                 if key.value not in section_config:
                     errors.append(f"{section_name}.{key.value} is required")
 

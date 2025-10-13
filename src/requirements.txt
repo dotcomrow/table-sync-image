@@ -15,6 +15,7 @@ requests==2.31.0             # 12+ years, most popular HTTP library
 # Configuration & Logging - Python Standard Enhanced
 pyyaml==6.0.1                # YAML configuration parsing
 structlog==23.2.0            # Structured logging (used by major companies)
+google-cloud-logging==3.8.0  # Google Cloud Logging integration
 
 # Monitoring & Health Checks - Proven Solutions
 flask==3.0.0                 # Lightweight web framework for health checks
