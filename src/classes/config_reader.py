@@ -107,35 +107,40 @@ class ConfigReader:
     def validate_config(self, config: Dict[str, Any]):
         errors = []
 
+        def validate_section(section_name: str, section_config: Dict[str, Any], keys_enum):
+            if not isinstance(section_config, dict):
+                errors.append(f"{section_name} must be a dictionary")
+                return
+
+            for key in keys_enum:
+                if key.value == "mock":
+                    continue  # Skip validation for the mock property
+                if key.value not in section_config:
+                    errors.append(f"{section_name}.{key.value} is required")
+
         # Validate yugabytedb
         yugabytedb = config.get(ConfigKeys.YUGABYTEDB.value, {})
-        if not isinstance(yugabytedb, dict):
-            errors.append("yugabytedb must be a dictionary")
+        validate_section(ConfigKeys.YUGABYTEDB.value, yugabytedb, YugabyteDBKeys)
 
         # Validate bigquery
         bigquery = config.get(ConfigKeys.BIGQUERY.value, {})
-        if not isinstance(bigquery, dict):
-            errors.append("bigquery must be a dictionary")
+        validate_section(ConfigKeys.BIGQUERY.value, bigquery, BigQueryKeys)
 
         # Validate kafka_connect
         kafka_connect = config.get(ConfigKeys.KAFKA_CONNECT.value, {})
-        if not isinstance(kafka_connect, dict):
-            errors.append("kafka_connect must be a dictionary")
+        validate_section(ConfigKeys.KAFKA_CONNECT.value, kafka_connect, KafkaConnectKeys)
 
         # Validate logging
         logging = config.get(ConfigKeys.LOGGING.value, {})
-        if not isinstance(logging, dict):
-            errors.append("logging must be a dictionary")
+        validate_section(ConfigKeys.LOGGING.value, logging, LoggingKeys)
 
         # Validate health_check
         health_check = config.get(ConfigKeys.HEALTH_CHECK.value, {})
-        if not isinstance(health_check, dict):
-            errors.append("health_check must be a dictionary")
+        validate_section(ConfigKeys.HEALTH_CHECK.value, health_check, HealthCheckKeys)
 
         # Validate processing
         processing = config.get(ConfigKeys.PROCESSING.value, {})
-        if not isinstance(processing, dict):
-            errors.append("processing must be a dictionary")
+        validate_section(ConfigKeys.PROCESSING.value, processing, ProcessingKeys)
 
         if errors:
             raise ValueError(f"Configuration validation errors: {', '.join(errors)}")
