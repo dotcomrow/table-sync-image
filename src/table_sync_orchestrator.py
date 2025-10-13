@@ -45,7 +45,8 @@ class TableSyncOrchestrator:
         self.config_path = config_path
         self.running = False
         config = ConfigReader(config_path).load_config()
-        yugabyte_manager = YugabyteDBManager(config)
+        logger = Logging(config)
+        yugabyte_manager = YugabyteDBManager(config, logger)
         yugabyte_manager.create_debezium_signal_table()
         
         if start_servers:
@@ -183,8 +184,9 @@ class TableSyncOrchestrator:
     def start(self):
         print( "Starting orchestrator")
         self.running = True
-        config = ConfigReader(config_path).load_config()
-        yugabyte_manager = YugabyteDBManager(config)
+        config = ConfigReader(self.config_path).load_config()
+        logger = Logging(config)
+        yugabyte_manager = YugabyteDBManager(config, logger)
         print( "Starting processing loop")
         try:
             print( "Starting table sync loop")
@@ -194,10 +196,10 @@ class TableSyncOrchestrator:
                     print( "Beginning processing")
                     try:
                         # Discover databases and create connectors as needed
-                        databases = self.yugabyte_manager._discover_databases()
+                        databases = yugabyte_manager._discover_databases()
                         print( "Databases discovered", databases=databases)
                     
-                        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                        with ThreadPoolExecutor(max_workers=config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                             futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 
                             for future in as_completed(futures):
