@@ -190,12 +190,12 @@ class YugabyteDBManager:
         );
         """
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id, table=table_info)
         try:
             self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database, stream_id], database=self.database)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Record inserted successfully", table_name=table_info.table)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Record inserted successfully", table_name=table_info.table, table=table_info)
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e))
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e), table=table_info)
             raise RuntimeError(f"Failed to insert record into debezium_signal table: {e}")
 
     def table_exists(self, database: str, table_name: str, schema: str) -> bool:
@@ -260,10 +260,10 @@ class YugabyteDBManager:
             WHERE id = %s
         );
         """
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", id=table_id)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", id=table_id, table=table_info)
         result = self.run_query(query, [table_id], database=self.database)
         exists = result[0][0] if result else False
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", exists=exists)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", exists=exists, table=table_info)
         return exists
     
     def fetch_tables_in_debezium_signal(self, database: str) -> list:
@@ -317,17 +317,17 @@ class YugabyteDBManager:
             raise
         
     def clear_yugabyte_table(self, database: str, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.table)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.table, table=table_info)
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table} CASCADE")
                 conn.commit()
         finally:
             conn.close()
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDB table cleared", database=database, table=table_info.table)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDB table cleared", database=database, table=table_info.table, table=table_info)
 
     def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting data into YugabyteDB", database=database, table=table_info.table, row_count=len(data))
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting data into YugabyteDB", database=database, table=table_info.table, row_count=len(data), table=table_info)
         try:
             with self.connect(database) as conn, conn.cursor() as cursor:
                 # Assuming the table has columns matching the BigQuery table
@@ -343,7 +343,7 @@ class YugabyteDBManager:
                 """
                 cursor.execute(column_types_query, (table_info.schema, table_info.table))
                 column_types = {row[0]: row[1] for row in cursor.fetchall()}
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Column types fetched", column_types=column_types)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Column types fetched", column_types=column_types, table=table_info)
 
                 # Convert dictionary values to JSON strings only for JSON/JSONB columns
                 for row in data:
@@ -356,16 +356,16 @@ class YugabyteDBManager:
                                 # Convert dict to JSON string
                                 row[key] = json.dumps(value)
                             else:
-                                self.logger.logMessage(Logging.LogLevel.WARNING, "Unexpected dict value for non-JSON column", column=key, value=value)
+                                self.logger.logMessage(Logging.LogLevel.WARNING, "Unexpected dict value for non-JSON column", column=key, value=value, table=table_info)
                                 row[key] = str(value)  # Fallback to string conversion
 
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data prepared for insertion", data=data)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data prepared for insertion", data=data, table=table_info)
 
                 # Use execute_batch for better performance with large volumes of data
                 execute_batch(cursor, query, data)
                 
                 conn.commit()
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data inserted successfully", database=database, table=table_info.table, row_count=len(data))
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data inserted successfully", database=database, table=table_info.table, row_count=len(data), table=table_info)
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert data into YugabyteDB", database=database, table=table_info.table, error=str(e))
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert data into YugabyteDB", database=database, table=table_info.table, error=str(e), table=table_info)
             raise RuntimeError(f"Failed to insert data into YugabyteDB: {e}")

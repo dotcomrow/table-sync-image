@@ -21,28 +21,28 @@ class BigQueryManager:
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "Initializing BigQuery client")
                 credentials = service_account.Credentials.from_service_account_file("/vault/secrets/gcp-key.json")
                 self.client = bigquery.Client(credentials=credentials)
-    
+
     def create_dataset(self, table_info: TableInfo):
         self._initialize_client()
         dataset_id = table_info.bq_dataset
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating dataset in BigQuery", dataset_id=dataset_id)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating dataset in BigQuery", dataset_id=dataset_id, table=table_info)
         dataset_ref = self.client.dataset(dataset_id)
         try:
             self.client.get_dataset(dataset_ref)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Dataset already exists", dataset_id=dataset_id)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Dataset already exists", dataset_id=dataset_id, table=table_info)
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.WARNING, "Dataset does not exist, creating it", dataset_id=dataset_id, error=str(e))
+            self.logger.logMessage(Logging.LogLevel.WARNING, "Dataset does not exist, creating it", dataset_id=dataset_id, error=str(e), table=table_info)
             dataset = bigquery.Dataset(dataset_ref)
             dataset.location = "US"  # Set location or make it configurable
             self.client.create_dataset(dataset)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Dataset created successfully", dataset_id=dataset_id)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Dataset created successfully", dataset_id=dataset_id, table=table_info)
 
     def delete_table(self, table_info: TableInfo):
         self._initialize_client()
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting table in BigQuery", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting table in BigQuery", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, table=table_info)
         table_ref = self.client.dataset(table_info.bq_dataset).table(table_info.bq_table)
         self.client.delete_table(table_ref)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Table deleted successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Table deleted successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, table=table_info)
 
     def check_table_exists(self, dataset_id, table_id):
         self._initialize_client()
@@ -56,10 +56,10 @@ class BigQueryManager:
             return False
 
     def fetch_bigquery_data(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetch BigQuery data", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetch BigQuery data", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, table=table_info)
         self._initialize_client()
         query = f"SELECT * FROM `{table_info.bq_dataset}.{table_info.bq_table}`"
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Executing BigQuery", query=query)
         query_job = self.client.query(query)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, total_rows=query_job.result().total_rows)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, total_rows=query_job.result().total_rows, table=table_info)
         return [dict(row) for row in query_job]
