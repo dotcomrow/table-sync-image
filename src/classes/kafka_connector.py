@@ -163,13 +163,13 @@ class KafkaConnector:
         timeout = 3 * 60  # 3 minutes in seconds
 
         while time.time() - start_time < timeout:
-            resp = self.bigquery_manager.check_table_exists(table_info.annotation.bq_dataset, table_info.annotation.bq_table)
-            if resp:
+            resp = self.check_connector_exists(table_info)
+            if resp.get("source_exists") and resp.get("sink_exists"):
                 break
             time.sleep(10)  # Wait for 10 seconds before retrying
         else:
             # Handle timeout case
-            raise TimeoutError("The table did not exist within the 3-minute timeout.", table=table_info.to_dict())
+            raise TimeoutError("The table did not exist within the 3-minute timeout.")
 
 
     def _derive_topic_and_mappings(self, table_info: TableInfo):
