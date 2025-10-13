@@ -278,8 +278,31 @@ class YugabyteDBManager:
         self.logger.logMessage(Logging.LogLevel.INFO, "Table entries fetched from debezium_signal table", count=len(result))
         return result
     
+    def check_stream_in_use(self, database: str, table: str) -> bool:
+        try:
+            query = """
+            SELECT COUNT(*) 
+            FROM public.debezium_signal
+            WHERE table_database = %s AND data->>'data-collections' = %s;
+            """
+            table_identifier = f"{database}.{table}"
+            self.logger.logMessage(Logging.LogLevel.INFO, "Checking if stream is in use for other tables", database=database, table=table)
+            result = self.run_query(query, [database, table_identifier], database=self.database)
+            count = result[0][0] if result else 0
+            in_use = count > 1  # If more than one entry exists, the stream is in use by other tables
+            self.logger.logMessage(Logging.LogLevel.INFO, "Stream usage check completed", in_use=in_use)
+            return in_use
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Error checking stream usage", database=database, table=table, error=str(e))
+            raise
+    
     def remove_entry_from_debezium_signal(self, database: str, table: str):
         """Remove an entry from the debezium_signal table."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Removal requested from debezium signal, checking to see if stream is in use for other tables", database=database, table=table)
+        in_use = self.check_stream_in_use(database, table)
+        if in_use:
+            self.logger.logMessage(Logging.LogLevel.INFO, "Stream is still in use by other tables, skipping removal", database=database, table=table)
+            return
         query = """
         DELETE FROM public.debezium_signal
         WHERE table_database = %s AND data->>'data-collections' = %s;

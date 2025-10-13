@@ -84,6 +84,26 @@ class TableSyncOrchestrator:
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
+    def remove_sync_setup(self, table_info: TableInfo):
+        config = ConfigReader(self.config_path).load_config()
+        logger = Logging(config)
+        yugabyte_manager = YugabyteDBManager(config, logger)
+        kafka_connector = KafkaConnector(config, logger)
+        bigquery_manager = BigQueryManager(config, logger)
+        
+        try:
+            if yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                logger.logMessage(Logging.LogLevel.INFO, "Tearing down connectors and removing from signal table", table=table_info.table)
+                yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+            if kafka_connector.check_connector_exists(table_info)['source_exists'] or kafka_connector.check_connector_exists(table_info)['sink_exists']:
+                kafka_connector.reset_connectors(table_info)
+                logger.logMessage(Logging.LogLevel.INFO, "Connectors reset successfully", table=table_info.table)
+            if bigquery_manager.check_table_exists(table_info):
+                bigquery_manager.delete_table(table_info)
+                logger.logMessage(Logging.LogLevel.INFO, "BigQuery table deleted successfully", table=table_info.table)
+        except Exception as e:
+            logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.table, error=str(e))
+    
     def _table_sync_loop(self, db):
         
         config = ConfigReader(self.config_path).load_config()
@@ -152,17 +172,12 @@ class TableSyncOrchestrator:
                         except Exception as e:
                             logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info.table, error=str(e))
             else:
-                logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table_info.table)
-                try:
-                    logger.logMessage(Logging.LogLevel.INFO, "Tearing down connectors and removing from signal table", table=table_info.table)
-                    yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
-                    logger.logMessage(Logging.LogLevel.INFO, "Removed entry from debezium signal table", table=table_info.table)
-                    kafka_connector.reset_connectors(table_info)
-                    logger.logMessage(Logging.LogLevel.INFO, "Connectors reset successfully", table=table_info.table)
-                    bigquery_manager.delete_table(table_info)
-                    logger.logMessage(Logging.LogLevel.INFO, "BigQuery table deleted successfully", table=table_info.table)
-                except Exception as e:
-                    logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.table, error=str(e))
+                if (table_info.annotation is not None and not table_info.annotation.enabled):
+                    logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled, removing from signal table and tearing down connectors", table=table_info.table)
+                    self.remove_sync_setup(table_info)
+                if table_info.annotation is None:
+                    logger.logMessage(Logging.LogLevel.INFO, "Table annotation not found, removing anything that might have been previously setup", table=table_info.table)
+                    self.remove_sync_setup(table_info)
                         
         # For tables in the database check entries in the signal table for tables in database
         # Fetch all signal table entries for database and verify that annotation is still enabled for each
@@ -170,16 +185,7 @@ class TableSyncOrchestrator:
             table_info = self.getTableInfoForTable(table, tables)
             if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
                 logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
-                try:
-                    logger.logMessage(Logging.LogLevel.INFO, "Tearing down connectors and removing from signal table", table=table)
-                    yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
-                    logger.logMessage(Logging.LogLevel.INFO, "Removed entry from debezium signal table", table=table)
-                    kafka_connector.reset_connectors(table_info)
-                    logger.logMessage(Logging.LogLevel.INFO, "Connectors reset successfully", table=table)
-                    bigquery_manager.delete_table(table_info)
-                    logger.logMessage(Logging.LogLevel.INFO, "BigQuery table deleted successfully", table=table)
-                except Exception as e:
-                    logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table, error=str(e))
+                self.remove_sync_setup(table_info)
 
     # ----------------------------- Main Loop -----------------------------
 
