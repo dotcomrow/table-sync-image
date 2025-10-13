@@ -43,8 +43,8 @@ from classes.yugabyte_db_manager import YugabyteDBManager
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
         self.running = False
-        self.logger = Logging(self.config)
         self.config = ConfigReader(config_path).load_config()
+        self.logger = Logging(self.config)
         self.yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         self.kafka_connector = KafkaConnector(self.config, self.logger)
         self.bigquery_manager = BigQueryManager(self.config, self.logger)
