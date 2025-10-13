@@ -28,7 +28,7 @@ class KafkaConnector:
         self.kc_url = config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
     
     def delete_sink_cdc_connector(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting sink CDC connector", table=table_info.full_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting sink CDC connector", table=table_info)
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
@@ -144,18 +144,18 @@ class KafkaConnector:
         return {"source_exists": source_exists, "sink_exists": sink_exists}
         
     def reset_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Resetting Kafka connectors for table", table=table_info.full_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Resetting Kafka connectors for table", table=table_info)
         status = self.check_connector_exists(table_info)
         if status.get("source_exists"):
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector exists, deleting", table=table_info.full_name, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector exists, deleting", table=table_info)
             self.delete_source_cdc_connector(table_info)
         
         if status.get("sink_exists"):
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector exists, deleting", table=table_info.full_name, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector exists, deleting", table=table_info)
             self.delete_sink_cdc_connector(table_info)
         
     def setup_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Setting up Kafka connectors for table", table=table_info.full_name, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Setting up Kafka connectors for table", table=table_info)
         self.create_source_connector(table_info)
         self.create_sink_connector(table_info)
         

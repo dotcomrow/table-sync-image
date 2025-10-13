@@ -317,17 +317,17 @@ class YugabyteDBManager:
             raise
         
     def clear_yugabyte_table(self, database: str, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.table, table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info)
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table} CASCADE")
                 conn.commit()
         finally:
             conn.close()
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDB table cleared", database=database, table=table_info.table, table=table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDB table cleared", database=database, table=table_info)
 
     def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting data into YugabyteDB", database=database, table=table_info.table, row_count=len(data), table=table_info)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting data into YugabyteDB", database=database, row_count=len(data), table=table_info)
         try:
             with self.connect(database) as conn, conn.cursor() as cursor:
                 # Assuming the table has columns matching the BigQuery table
@@ -365,7 +365,7 @@ class YugabyteDBManager:
                 execute_batch(cursor, query, data)
                 
                 conn.commit()
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data inserted successfully", database=database, table=table_info.table, row_count=len(data), table=table_info)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Data inserted successfully", database=database, row_count=len(data), table=table_info)
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert data into YugabyteDB", database=database, table=table_info.table, error=str(e), table=table_info)
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert data into YugabyteDB", database=database, error=str(e), table=table_info)
             raise RuntimeError(f"Failed to insert data into YugabyteDB: {e}")
