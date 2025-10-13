@@ -1,4 +1,3 @@
-import logging
 import structlog
 import enum
 from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys
@@ -13,6 +12,7 @@ class Logging:
     
     def _init_logger(self) -> structlog.BoundLogger:
         lvl = self.config.get(ConfigKeys.LOGGING.value).get(LoggingKeys.LEVEL.value, "INFO").upper()
+        print("Setting system log level to:", lvl)
         numeric = self.LogLevel[lvl] if lvl in self.LogLevel.__members__ else self.LogLevel.INFO
         structlog.configure(
             processors=[
@@ -30,8 +30,8 @@ class Logging:
         if level == self.LogLevel.DEBUG:
             self.logger.debug(message, **kwargs)
         elif level == self.LogLevel.INFO:
-            self.logger.logMessage(Logging.LogLevel.INFO, message, **kwargs)
+            self.logger.info(message, **kwargs)
         elif level == self.LogLevel.WARNING:
             self.logger.warning(message, **kwargs)
         elif level == self.LogLevel.ERROR:
-            self.logger.logMessage(Logging.LogLevel.ERROR, message, **kwargs)
+            self.logger.error(message, **kwargs)
