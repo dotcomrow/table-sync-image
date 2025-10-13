@@ -57,6 +57,7 @@ class TableSyncOrchestrator:
 
     def _start_health_server(self):
         config = ConfigReader(self.config_path).load_config()
+        port = int((config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
         app = Flask(__name__)
 
         @app.route('/health')
@@ -68,11 +69,10 @@ class TableSyncOrchestrator:
             return jsonify({'status': 'ready', 'running': self.running})
 
         def run_server():
-            port = int((config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
             app.run(host='0.0.0.0', port=port, debug=False)
 
         threading.Thread(target=run_server, daemon=True).start()
-        print( "Health server started", port=(config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
+        print(f"Health server started, port {port}")
         
     # ------------------------------ Helper functions ------------------------------
     
