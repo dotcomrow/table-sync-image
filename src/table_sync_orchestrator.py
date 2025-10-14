@@ -44,9 +44,6 @@ class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
         self.config_path = config_path
         self.running = False
-        config = ConfigReader(config_path).load_config()
-        logger = Logging(config)
-        yugabyte_manager = YugabyteDBManager(config, logger)
         
         if start_servers:
             if not os.getenv('DISABLE_HEALTH'):
@@ -203,7 +200,7 @@ class TableSyncOrchestrator:
                     print(f"Beginning processing")
                     try:
                         # Discover databases and create connectors as needed
-                        databases = yugabyte_manager._discover_databases()
+                        databases = yugabyte_manager._discover_databases("kafka")
                         print(f"Databases discovered: {databases}")
                     
                         with ThreadPoolExecutor(max_workers=config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
