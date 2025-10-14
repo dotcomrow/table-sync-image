@@ -207,7 +207,7 @@ class YugabyteDBManager:
         );
         """
         try:
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if table exists", table=table_name)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if table exists", table=table_name, database=database, schema=schema)
             result = self.run_query(query, [schema, table_name], database=database)
             return result[0][0] if result else False
         except Exception as e:
