@@ -207,11 +207,11 @@ class YugabyteDBManager:
         );
         """
         try:
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if table exists. table={table}, database={database}, schema={schema}", table=table_name, database=database, schema=schema)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if table exists. table: " + table_name + " database: " + database + " schema: " + schema)
             result = self.run_query(query, [schema, table_name], database=database)
             return result[0][0] if result else False
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to check if table exists.  table={table}, database={database}, schema={schema}", table=table_name, database=database, schema=schema, error=str(e))
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to check if table exists. error: " + str(e) + " table: " + table_name + " database: " + database + " schema: " + schema)
             raise
     
     def create_debezium_signal_table(self, database: str):
