@@ -34,3 +34,16 @@ INSERT INTO test_schema.testtable (name) VALUES ('Sample Name 3'), ('Sample Name
 
 COMMENT ON TABLE test_schema.testtable IS
 '{"bootstrap":{"enabled":true, "bq": "test_schema.testtable"}}';
+
+CREATE TABLE test_schema.mcp_openapi_usage_hints (
+  augmentation_id INT NOT NULL,
+  hint VARCHAR(255) NOT NULL
+);
+
+COMMENT ON TABLE test_schema.testtable IS
+'{"bootstrap":{"enabled":true, "bq": "test_schema.testtable"}}';
+
+COMMENT ON TABLE test_schema.mcp_openapi_usage_hints IS
+'{"bootstrap":{"enabled":true, "bq": "test_schema.mcp_openapi_usage_hints"}}';
+
+INSERT INTO test_schema.mcp_openapi_usage_hints (augmentation_id, hint) VALUES (1, 'Hint 1'), (2, 'Hint 2');

@@ -10,27 +10,30 @@ from classes.config_reader import ConfigReader
 from classes.kafka_connector import KafkaConnector
 from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
+from classes.logging import Logging
 
 class TestKafkaConnector(unittest.TestCase):
     def setUp(self):
         config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../sample/test_config.yaml"))
         self.config = ConfigReader(config_path).load_config()
-        self.yugabyte_manager = YugabyteDBManager(self.config)
-        self.kafka_connector = KafkaConnector(self.config)
-        self.bigquery_manager = BigQueryManager(self.config)
+        self.logger = Logging(self.config)
+        self.yugabyte_manager = YugabyteDBManager(self.config, self.logger)
+        self.kafka_connector = KafkaConnector(self.config, self.logger)
+        self.bigquery_manager = BigQueryManager(self.config, self.logger)
+        
         
         self.table_info = TableInfo(
             database="testdb",
-            schema="public",
-            table="testtable",
-            annotation=TableAnnotation.from_comment('{"bootstrap":{"enabled":true, "bq": "yugabyte_backup.testtable"}}')
+            schema="test_schema",
+            table="mcp_openapi_usage_hints",
+            annotation=TableAnnotation.from_comment('{"bootstrap":{"enabled":true, "bq": "mcp.mcp_openapi_usage_hints"}}')
         )
 
     def test_basic_setup(self):
         """Test BigQuery table creation."""
         src = self.kafka_connector.create_source_connector(self.table_info)
         sink = self.kafka_connector.create_sink_connector(self.table_info)
-        resp = self.bigquery_manager.check_table_exists("yugabyte_backup", "testtable")
+        resp = self.bigquery_manager.check_table_exists("mcp", "mcp_openapi_usage_hints")
         self.assertTrue(resp)
 
 if __name__ == "__main__":
