@@ -78,7 +78,7 @@ class YugabyteDBManager:
         excluded = excluded or ['postgres', 'template0', 'template1']
         query = "SELECT datname FROM pg_database WHERE datistemplate = false;"
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Discovering databases", excluded=excluded)
-        all_databases = [row[0] for row in self.run_query(query, database)]
+        all_databases = [row[0] for row in self.run_query(query, database, None)]
         databases = [db for db in all_databases if db not in excluded]
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Databases discovered", databases=databases)
         return databases
@@ -191,7 +191,7 @@ class YugabyteDBManager:
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id, table=table_info.to_dict())
         try:
-            self.run_query(query, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database, stream_id], database=database)
+            self.run_query(query, database, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database, stream_id])
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Record inserted successfully", table_name=table_info.table, table=table_info.to_dict())
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e), table=table_info.to_dict())
@@ -208,7 +208,7 @@ class YugabyteDBManager:
         """
         try:
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if table exists. table: " + table_name + " database: " + database + " schema: " + schema)
-            result = self.run_query(query, [schema, table_name], database=database)
+            result = self.run_query(query, database, [schema, table_name])
             return result[0][0] if result else False
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to check if table exists. error: " + str(e) + " table: " + table_name + " database: " + database + " schema: " + schema)
@@ -235,7 +235,7 @@ class YugabyteDBManager:
                     self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete CDC stream for entry", database=entry[0], table=entry[1], error=str(e))
 
             self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table already exists, clearing table")
-            self.run_query(query="TRUNCATE TABLE public.debezium_signal;", database=database)
+            self.run_query("TRUNCATE TABLE public.debezium_signal;", database, None)
         
         query = """
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
@@ -247,7 +247,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating debezium_signal table if not exists")
-        self.run_query(query, database)
+        self.run_query(query, database, None)
         self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table created or already exists")
 
     def entry_exists_in_debezium_signal(self, table_info: TableInfo, database: str) -> bool:
@@ -260,7 +260,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", id=table_id, table=table_info.to_dict())
-        result = self.run_query(query, [table_id], database=database)
+        result = self.run_query(query, database, [table_id])
         exists = result[0][0] if result else False
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", exists=exists, table=table_info.to_dict())
         return exists
@@ -273,7 +273,7 @@ class YugabyteDBManager:
         WHERE table_database = %s;
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching table entries from debezium_signal table", database=database)
-        result = self.run_query(query, [database], database=database)
+        result = self.run_query(query, database, [database])
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Table entries fetched from debezium_signal table", count=len(result))
         return result
     
@@ -286,7 +286,7 @@ class YugabyteDBManager:
             """
             table_identifier = f"{database}.{table}"
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if stream is in use for other tables", database=database, table=table)
-            result = self.run_query(query, [database, table_identifier], database=database)
+            result = self.run_query(query, database, [database, table_identifier])
             count = result[0][0] if result else 0
             in_use = count > 1  # If more than one entry exists, the stream is in use by other tables
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream usage check completed", in_use=in_use)
@@ -309,7 +309,7 @@ class YugabyteDBManager:
         table_identifier = f"{database}.{table}"
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing entry from debezium_signal table", database=database, table=table)
         try:
-            self.run_query(query, [database, table_identifier], database=database)
+            self.run_query(query, database, [database, table_identifier])
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry removed successfully from debezium_signal table", database=database, table=table)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
