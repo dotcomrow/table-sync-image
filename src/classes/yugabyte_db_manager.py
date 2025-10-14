@@ -250,7 +250,7 @@ class YugabyteDBManager:
         self.run_query(query, database, None)
         self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table created or already exists")
 
-    def entry_exists_in_debezium_signal(self, table_info: TableInfo, database: str) -> bool:
+    def entry_exists_in_debezium_signal(self, table_info: TableInfo) -> bool:
         """Check if an entry exists in the debezium_signal table for the given TableInfo."""
         table_id = f'snap_{table_info.schema}_{table_info.table}'
         query = """
@@ -260,7 +260,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", id=table_id, table=table_info.to_dict())
-        result = self.run_query(query, database, [table_id])
+        result = self.run_query(query, table_info.database, [table_id])
         exists = result[0][0] if result else False
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", exists=exists, table=table_info.to_dict())
         return exists
