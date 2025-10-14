@@ -49,19 +49,19 @@ class YugabyteDBManager:
 
     def run_query(self, query: str, database: str, params: List[Any] = None):
         """Run a query on the YugabyteDB database."""
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Running query on YugabyteDB", query=query, params=params)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Running query on YugabyteDB. query: " + query + " database: " + database + " params: " + str(params))
         connection = self.connect(database)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 if query.strip().lower().startswith("select"):
                     result = cursor.fetchall()
-                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully", result=result)
+                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully. result: " + str(result))
                     return result
                 connection.commit()
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Query committed successfully", query=query, params=params)
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Query committed successfully. query: " + query + " params: " + str(params))
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to execute query", query=query, error=str(e))
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to execute query. query: " + query + " error: " + str(e))
             raise RuntimeError(f"Failed to execute query: {e}")
         finally:
             connection.close()
