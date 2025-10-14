@@ -21,7 +21,6 @@ class KafkaConnector:
         self.port = db_cfg.get(YugabyteDBKeys.PORT.value, 5433)
         self.user = db_cfg.get(YugabyteDBKeys.USER.value, 'yugabyte')
         self.password = db_cfg.get(YugabyteDBKeys.PASSWORD.value, 'yugabyte')
-        self.database = db_cfg.get(YugabyteDBKeys.DATABASE.value, 'yugabyte')
         self.yugabyte_manager = YugabyteDBManager(config, logging)
         self.bigquery_manager = BigQueryManager(config, logging)
         self.db_master_addresses = db_cfg.get(YugabyteDBKeys.MASTER_ADDRESSES.value, None)
@@ -215,7 +214,7 @@ class KafkaConnector:
             "table.include.list": f"{table_info.schema}.{table_info.table}",
             "snapshot.mode": "initial",
             "incremental.snapshot.enabled": "true",
-            "signal.data.collection": f"{table_info.schema}.debezium_signal",
+            "signal.data.collection": f"public.debezium_signal",
             "incremental.snapshot.chunk.size": "10000",   # optional
 
             # Use the YB unwrap SMT (fine with Avro)
