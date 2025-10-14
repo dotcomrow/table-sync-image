@@ -258,7 +258,7 @@ class YugabyteDBManager:
             WHERE id = '""" + f'snap_{table_info.schema}_{table_info.table}' + """'
         );
         """
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table. query: " + query, table=table_info.to_dict())
         result = self.run_query(query, table_info.database, None)
         exists = result[0][0] if result else False
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", exists=exists, table=table_info.to_dict())
