@@ -56,7 +56,7 @@ class YugabyteDBManager:
                 cursor.execute(query, params)
                 if query.strip().lower().startswith("select"):
                     result = cursor.fetchall()
-                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully. result: " + str(result))
+                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully. query: " + query + " result: " + str(result))
                     return result
                 connection.commit()
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "Query committed successfully. query: " + query + " params: " + str(params))

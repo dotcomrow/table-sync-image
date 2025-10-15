@@ -221,6 +221,7 @@ class TableSyncOrchestrator:
                         elapsed = time.time() - start
                         print(f"Scan loop complete, elapsed time: {elapsed}")
                         time.sleep(max(0, config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
+                        
             except Exception as e:
                 error=str(e)
                 print(f"Unexpected error in table sync loop: {error}")

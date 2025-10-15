@@ -193,6 +193,8 @@ class KafkaConnector:
 
 
     def create_source_connector(self, table_info: TableInfo):
+        # this method will fail if the table does not have a primary key field
+        # TODO: add test to verify if connector created correctly if table has primary key
         stream_id = self.get_cdc_stream_id(table_info)
 
         # Build topic + server name consistently, so sink can subscribe correctly
