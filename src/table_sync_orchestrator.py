@@ -43,7 +43,13 @@ from classes.yugabyte_db_manager import YugabyteDBManager
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
         self.config_path = config_path
-        self.running = False
+        self.running = False        
+        config = ConfigReader(self.config_path).load_config()
+        logger = Logging(config)
+        yugabyte_manager = YugabyteDBManager(config, logger)
+        databases = yugabyte_manager._discover_databases("kafka")
+        for db in databases:
+            yugabyte_manager.create_debezium_signal_table(db)
         
         if start_servers:
             if not os.getenv('DISABLE_HEALTH'):
@@ -106,7 +112,6 @@ class TableSyncOrchestrator:
         yugabyte_manager = YugabyteDBManager(config, logger)
         kafka_connector = KafkaConnector(config, logger)
         bigquery_manager = BigQueryManager(config, logger)
-        yugabyte_manager.create_debezium_signal_table(db)
         
         tables = yugabyte_manager._discover_tables(db)
         logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables])
