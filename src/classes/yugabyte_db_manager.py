@@ -22,7 +22,7 @@ class YugabyteDBManager:
         self.password = db_cfg.get('password', 'yugabyte')
         self.logger = logger
 
-    def connect(self, database: str = None):
+    def connect(self, database: str):
         if self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MOCK.value, False):
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Mock connect called")
             from unittest.mock import MagicMock
@@ -259,6 +259,12 @@ class YugabyteDBManager:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table. query: " + query + " table_id: " + table_id, table=table_info.to_dict())
         result = self.run_query(query, table_info.database, [table_id])
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed. raw_result: " + str(result), table=table_info.to_dict())
+        query2 = """
+        select * from public.debezium_signal;
+        """
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching all entries from debezium_signal table", table=table_info.to_dict())
+        result2 = self.run_query(query2, table_info.database, None)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "All entries from debezium_signal table. entries: " + str(result2), entries=result2, table=table_info.to_dict())
         if result[0][0] > 0:
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry already exists in debezium_signal table", table_id=table_id, table=table_info.to_dict())
             return True
