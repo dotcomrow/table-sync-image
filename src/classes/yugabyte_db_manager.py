@@ -254,7 +254,7 @@ class YugabyteDBManager:
         """Check if an entry exists in the debezium_signal table for the given TableInfo."""
         table_id = f'snap_{table_info.schema}_{table_info.table}'
         query = """
-        select count(*) from public.debezium_signal where id = %s;
+        select count(*) from public.debezium_signal where id = '%s';
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table. query: " + query + " table_id: " + table_id, table=table_info.to_dict())
         result = self.run_query(query, table_info.database, [table_id])
