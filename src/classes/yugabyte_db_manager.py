@@ -259,8 +259,7 @@ class YugabyteDBManager:
             WHERE id = %s
         );
         """
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table", 
-                             query=query, table_id=table_id, table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table. query: " + query + " table_id: " + table_id, table=table_info.to_dict())
         result = self.run_query(query, table_info.database, [table_id])
         exists = result[0][0] if result else False
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed", 
