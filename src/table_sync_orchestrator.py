@@ -44,9 +44,9 @@ class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
         self.config_path = config_path
         self.running = False        
-        config = ConfigReader(self.config_path).load_config()
-        logger = Logging(config)
-        yugabyte_manager = YugabyteDBManager(config, logger)
+        self.config = ConfigReader(self.config_path).load_config()
+        self.logger = Logging(self.config)
+        yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         databases = yugabyte_manager._discover_databases("kafka")
         for db in databases:
             yugabyte_manager.create_debezium_signal_table(db)
@@ -58,8 +58,7 @@ class TableSyncOrchestrator:
     # ----------------------------- Health & Metrics Servers -----------------------------
 
     def _start_health_server(self):
-        config = ConfigReader(self.config_path).load_config()
-        port = int((config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
+        port = int((self.config.get(ConfigKeys.HEALTH_CHECK.value, {}) or {}).get(HealthCheckKeys.PORT.value, 8080))
         app = Flask(__name__)
 
         @app.route('/health')
@@ -84,9 +83,7 @@ class TableSyncOrchestrator:
                 return t
         return None
     
-    def remove_sync_setup(self, table_info: TableInfo):
-        config = ConfigReader(self.config_path).load_config()
-        logger = Logging(config)
+    def remove_sync_setup(self, table_info: TableInfo, logger: Logging, config: ConfigReader):
         yugabyte_manager = YugabyteDBManager(config, logger)
         kafka_connector = KafkaConnector(config, logger)
         bigquery_manager = BigQueryManager(config, logger)
@@ -107,11 +104,10 @@ class TableSyncOrchestrator:
     # ----------------------------- Orchestrator Loop -----------------------------
     
     def _table_sync_loop(self, db):
-        config = ConfigReader(self.config_path).load_config()
-        logger = Logging(config)
-        yugabyte_manager = YugabyteDBManager(config, logger)
-        kafka_connector = KafkaConnector(config, logger)
-        bigquery_manager = BigQueryManager(config, logger)
+        logger = Logging(self.config)
+        yugabyte_manager = YugabyteDBManager(self.config, logger)
+        kafka_connector = KafkaConnector(self.config, logger)
+        bigquery_manager = BigQueryManager(self.config, logger)
         
         tables = yugabyte_manager._discover_tables(db)
         logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables])
@@ -175,10 +171,10 @@ class TableSyncOrchestrator:
             else:
                 if (table_info.annotation is not None and not table_info.annotation.enabled):
                     logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled, removing from signal table and tearing down connectors", table=table_info.to_dict())
-                    self.remove_sync_setup(table_info)
+                    self.remove_sync_setup(table_info, logger, self.config)
                 if table_info.annotation is None:
                     logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation not found, removing anything that might have been previously setup", table=table_info.to_dict())
-                    self.remove_sync_setup(table_info)
+                    self.remove_sync_setup(table_info, logger, self.config)
                         
         # For tables in the database check entries in the signal table for tables in database
         # Fetch all signal table entries for database and verify that annotation is still enabled for each
@@ -186,29 +182,22 @@ class TableSyncOrchestrator:
             table_info = self.getTableInfoForTable(table, tables)
             if table_info is None or table_info.annotation is None or not table_info.annotation.enabled:
                 logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table)
-                self.remove_sync_setup(table_info)
+                self.remove_sync_setup(table_info, logger, self.config)
 
     # ----------------------------- Main Loop -----------------------------
 
     def start(self):
-        print("Starting orchestrator")
         self.running = True
-        config = ConfigReader(self.config_path).load_config()
-        logger = Logging(config)
-        yugabyte_manager = YugabyteDBManager(config, logger)
-        print("Starting processing loop")
+        yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         try:
-            print("Starting table sync loop")
             try:
                 while self.running:
                     start = time.time()
-                    print(f"Beginning processing")
                     try:
                         # Discover databases and create connectors as needed
                         databases = yugabyte_manager._discover_databases("kafka")
-                        print(f"Databases discovered: {databases}")
-                    
-                        with ThreadPoolExecutor(max_workers=config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                        
+                        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                             futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 
                             for future in as_completed(futures):
@@ -217,28 +206,25 @@ class TableSyncOrchestrator:
                                     future.result()
                                 except Exception as e:
                                     error=str(e)
-                                    print(f"Error in table sync loop: {error}")
+                                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", database=ti, error=error)
 
                     except Exception as e:
                         error=str(e)
-                        print(f"Error during table sync: {error}")
+                        self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
                     finally:
                         elapsed = time.time() - start
-                        print(f"Scan loop complete, elapsed time: {elapsed}")
-                        time.sleep(max(0, config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
+                        self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed)
+                        time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
                         
             except Exception as e:
                 error=str(e)
-                print(f"Unexpected error in table sync loop: {error}")
-            finally:
-                print("Table sync loop exiting")
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in table sync loop", error=error)
 
         except Exception as e:
             error=str(e)
-            print(f"Unexpected error in orchestrator: {error}")
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in orchestrator", error=error)
         finally:
             self.running = False
-            print("Orchestrator stopped")
 
 # ----------------------------- Main Entry -----------------------------
 
@@ -257,7 +243,6 @@ def main():
     try:
         orchestrator.start()
     except KeyboardInterrupt:
-        print("Stopping orchestrator...")
         orchestrator.running = False
     except Exception as e:
         print(f"Unexpected error in orchestrator: {e}", file=sys.stderr)

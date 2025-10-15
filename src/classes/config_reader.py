@@ -79,31 +79,10 @@ class ConfigReader:
 
             cfg = ConfigDict(cfg)
 
-            # Allow DATABASE_URL to override yugabytedb section
-            self.parse_database_url(cfg)
             return cfg
         except Exception as e:
             print(f"Failed to load config from {self.config_path}: {e}", file=sys.stderr)
             sys.exit(1)
-
-    def parse_database_url(self, config: Dict[str, Any]):
-        url = os.getenv('DATABASE_URL')
-        if not url:
-            return
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            config.setdefault('yugabytedb', {})
-            yb = config['yugabytedb']
-            if parsed.hostname: yb['host'] = parsed.hostname
-            if parsed.port:     yb['port'] = parsed.port
-            if parsed.username: yb['user'] = parsed.username
-            if parsed.password: yb['password'] = parsed.password
-            if parsed.path and parsed.path != '/':
-                yb['database'] = parsed.path.lstrip('/')
-            print(f"✅ Parsed DATABASE_URL for {parsed.username}@{parsed.hostname}:{parsed.port} → db={yb.get('database','(none)')}")
-        except Exception as e:
-            print(f"Warning: Failed to parse DATABASE_URL: {e}", file=sys.stderr)
 
     def validate_config(self, config: Dict[str, Any]):
         errors = []

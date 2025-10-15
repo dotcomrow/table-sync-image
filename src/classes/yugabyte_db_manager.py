@@ -235,7 +235,7 @@ class YugabyteDBManager:
                     self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete CDC stream for entry", database=entry[0], table=entry[1], error=str(e))
 
             self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table already exists, clearing table")
-            self.run_query("TRUNCATE TABLE public.debezium_signal;", database, None)
+            self.run_query("TRUNCATE TABLE public.debezium_signal;", database)
         
         query = """
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
@@ -247,7 +247,7 @@ class YugabyteDBManager:
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating debezium_signal table if not exists")
-        self.run_query(query, database, None)
+        self.run_query(query, database)
         self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table created or already exists")
 
     def entry_exists_in_debezium_signal(self, table_info: TableInfo) -> bool:
