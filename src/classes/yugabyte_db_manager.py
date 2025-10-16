@@ -82,6 +82,60 @@ class YugabyteDBManager:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Databases discovered", databases=databases)
         return databases
     
+    def _has_primary_key_with_id_column(self, cursor, schema: str, table: str) -> bool:
+        """Check if a table has a primary key and an 'id' column, ideally the 'id' column should be the primary key."""
+        try:
+            # Query to get primary key columns and check if 'id' column exists
+            pk_query = """
+                SELECT 
+                    kcu.column_name,
+                    EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns c 
+                        WHERE c.table_schema = %s 
+                        AND c.table_name = %s 
+                        AND c.column_name = 'id'
+                    ) as has_id_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu 
+                    ON tc.constraint_name = kcu.constraint_name 
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = %s
+                    AND tc.table_name = %s
+                ORDER BY kcu.ordinal_position;
+            """
+            cursor.execute(pk_query, (schema, table, schema, table))
+            results = cursor.fetchall()
+            
+            if not results:
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has no primary key", schema=schema, table=table)
+                return False
+            
+            # Check if table has an 'id' column
+            has_id_column = results[0]['has_id_column'] if results else False
+            if not has_id_column:
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has no 'id' column", schema=schema, table=table)
+                return False
+            
+            # Get primary key column names
+            pk_columns = [row['column_name'] for row in results]
+            
+            # Check if 'id' is part of the primary key (preferably the only column)
+            if 'id' in pk_columns:
+                if len(pk_columns) == 1:
+                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has 'id' as single primary key", schema=schema, table=table)
+                else:
+                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has 'id' as part of composite primary key", schema=schema, table=table, pk_columns=pk_columns)
+                return True
+            else:
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has primary key but 'id' is not part of it", schema=schema, table=table, pk_columns=pk_columns)
+                return False
+                
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to check primary key for table", schema=schema, table=table, error=str(e))
+            return False
+
     def _discover_tables(self, database: str) -> List[TableInfo]:
         """Discover all tables in all schemas of the specified database."""
         out: List[TableInfo] = []
@@ -96,6 +150,7 @@ class YugabyteDBManager:
                     JOIN pg_namespace n   ON n.oid = c.relnamespace AND n.nspname = t.table_schema
                     WHERE t.table_type = 'BASE TABLE'
                       AND t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                      AND NOT (t.table_schema = 'public' AND t.table_name = 'debezium_signal')
                       AND t.table_catalog = %s
                     ORDER BY t.table_schema, t.table_name
                 """
@@ -108,6 +163,11 @@ class YugabyteDBManager:
                 rows = cur.fetchall()
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "SQL query executed successfully", row_count=len(rows), rows=rows)
                 for row in rows:
+                    # Check if table has primary key with 'id' column before adding to sync candidates
+                    if not self._has_primary_key_with_id_column(cur, row['table_schema'], row['table_name']):
+                        self.logger.logMessage(Logging.LogLevel.DEBUG, "Skipping table - does not meet BigQuery sync requirements", schema=row['table_schema'], table=row['table_name'])
+                        continue
+                    
                     ann = TableAnnotation.from_comment(row['table_comment']) if row['table_comment'] else None
                     out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
         except Exception as e:
