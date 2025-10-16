@@ -99,6 +99,17 @@ class TableSyncOrchestrator:
                 logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table deleted successfully", table=table_info.to_dict())
         except Exception as e:
             logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.to_dict(), error=str(e))
+            
+    def prepare_database(self, db: str, logger: Logging, config: ConfigReader):
+        yugabyte_manager = YugabyteDBManager(config, logger)
+        try:
+            yugabyte_manager.create_debezium_signal_table(db)
+            yugabyte_manager.create_stream_table(db)
+            stream_id = yugabyte_manager.create_stream(db)
+            yugabyte_manager.insert_into_stream_table(db, stream_id)
+            logger.logMessage(Logging.LogLevel.DEBUG, "Debezium signal table ensured", database=db)
+        except Exception as e:
+            logger.logMessage(Logging.LogLevel.ERROR, "Error preparing database", database=db, error=str(e))
 
     # ----------------------------- Orchestrator Loop -----------------------------
     
@@ -200,13 +211,22 @@ class TableSyncOrchestrator:
     def start(self):
         self.running = True
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
+        databases = yugabyte_manager._discover_databases()
+        print(f"Discovered databases: {databases}")
+        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+            futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+            
+            for future in as_completed(futures):
+                ti = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    error=str(e)
+                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", response=ti, error=error)
         
         while self.running:
             start = time.time()
             try:
-                # Discover databases and create connectors as needed
-                databases = yugabyte_manager._discover_databases("kafka")
-                        
                 with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                     futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 

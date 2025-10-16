@@ -62,52 +62,6 @@ class KafkaConnector:
 
         self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=source_connector_name, table=table_info.to_dict())
 
-    def get_cdc_stream_id(self, table_info):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching CDC stream ID", table_info=table_info)
-        master_addrs = (
-            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
-            or os.getenv("YB_MASTER_ADDRESSES")
-        )
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Master addresses resolved", master_addresses=master_addrs, table=table_info.to_dict())
-        if not master_addrs:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured", table=table_info.to_dict())
-            raise ValueError("Master addresses not configured")
-
-        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
-        namespace = f"ysql.{table_info.database}"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin binary and namespace resolved", yb_admin_bin=yb_admin_bin, namespace=namespace, table=table_info.to_dict())
-
-        try:
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_streams"],
-                text=True, stderr=subprocess.STDOUT, timeout=20
-            )
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin list_change_data_streams output", output=out, table=table_info.to_dict())
-            match = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
-            if match:
-                stream_id = match.group(1)
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Found CDC stream ID", stream_id=stream_id, table=table_info.to_dict())
-                return stream_id
-        except subprocess.CalledProcessError as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to list CDC streams", error=str(e), table=table_info.to_dict())
-
-        try:
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "create_change_data_stream", namespace],
-                text=True, stderr=subprocess.STDOUT, timeout=20
-            )
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin create_change_data_stream output", output=out, table=table_info.to_dict())
-            match = re.search(r"CDC Stream ID:\s*([0-9a-f]{32})", out, re.I)
-            if match:
-                stream_id = match.group(1)
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Created CDC stream ID", stream_id=stream_id, table=table_info.to_dict())
-                return stream_id
-        except subprocess.CalledProcessError as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream", error=str(e), table=table_info.to_dict())
-
-        self.logger.logMessage(Logging.LogLevel.WARNING, "No CDC stream ID found or created", table=table_info.to_dict())
-        return None
-
     def check_connector_exists(self, table_info: TableInfo) -> bool:
         source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
         sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
@@ -191,11 +145,10 @@ class KafkaConnector:
 
         return topic, dataset, table, server_name
 
-
     def create_source_connector(self, table_info: TableInfo):
         # this method will fail if the table does not have a primary key field
         # TODO: add test to verify if connector created correctly if table has primary key
-        stream_id = self.get_cdc_stream_id(table_info)
+        stream_id = self.yugabyte_manager.get_cdc_stream_id(table_info)
         try:
             # Build topic + server name consistently, so sink can subscribe correctly
             topic, _, _, server_name = self._derive_topic_and_mappings(table_info)

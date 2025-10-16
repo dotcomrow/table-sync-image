@@ -68,7 +68,7 @@ class YugabyteDBManager:
             
     # ----------------------------- Discovery -----------------------------
 
-    def _discover_databases(self, database: str) -> List[str]:
+    def _discover_databases(self, database: str = "kafka") -> List[str]:
         excluded = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.EXCLUDED_DATABASES.value, ['postgres', 'template0', 'template1'])
         return self.discover_databases(database, excluded)
 
@@ -272,37 +272,67 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to check if table exists. error: " + str(e) + " table: " + table_name + " database: " + database + " schema: " + schema)
             raise
+        
+    def create_stream_table(self, database: str):
+        if self.table_exists(database, 'database_stream', 'public'):
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "database_stream table already exists")
+            return
+        
+        query = """
+        CREATE TABLE IF NOT EXISTS public.database_stream (
+            stream_id text PRIMARY KEY
+        )
+        """
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating database_stream table if not exists")
+        self.run_query(query, database)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "database_stream table created or already exists")
+        
+    def get_cdc_stream_id(self, table_info: TableInfo) -> str:
+        """Get or create a CDC stream ID for the given TableInfo."""
+        select_query = """
+        SELECT stream_id FROM public.database_stream LIMIT 1;
+        """
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching existing stream ID from database_stream table")
+        existing = self.run_query(select_query, table_info.database, None)
+        if existing:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Existing stream ID found", stream_id=existing[0][0])
+            return existing[0][0]
+        else:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "No existing stream ID found in database_stream table, stream should already exist!", table=table_info.to_dict())
+            raise RuntimeError("No existing stream ID found in database_stream table")
+        
+    def insert_into_stream_table(self, stream_id: str, database: str):
+        select_query = """
+        SELECT stream_id FROM public.database_stream WHERE stream_id = %s;
+        """
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if stream ID already exists in database_stream table", stream_id=stream_id)
+        existing = self.run_query(select_query, database, [stream_id])
+        if existing:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream ID already exists in database_stream table.  Review why this happened as this function should not be called if a stream already exists for this db", current_stream_id=existing[0][0])
+            return
+            
+        query = """
+        INSERT INTO public.database_stream (stream_id)
+        VALUES (%s);
+        """
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting stream ID into database_stream table", stream_id=stream_id)
+        try:
+            self.run_query(query, database, [stream_id])
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream ID inserted successfully", stream_id=stream_id)
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert stream ID into database_stream table", stream_id=stream_id, error=str(e))
+            raise RuntimeError(f"Failed to insert stream ID into database_stream table: {e}")
     
     def create_debezium_signal_table(self, database: str):
-        """Create the debezium_signal table if it does not exist."""
+        """Create the debezium_signal and database_stream tables if they do not exist."""
         if self.table_exists(database, 'debezium_signal', 'public'):
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table exists, fetching previous entries to clear streams")
-            entries = self.run_query("""
-                SELECT 
-                    table_database, 
-                    jsonb_array_elements_text(data->'data-collections') AS table_name,
-                    stream_id
-                FROM 
-                    public.debezium_signal;
-            """, database=database)
-            for entry in entries:
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry", entry=entry)
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing CDC stream for entry", database=entry[0], table=entry[1], stream_id=entry[2])
-                try:
-                    self.delete_stream(entry[2])
-                except Exception as e:
-                    self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete CDC stream for entry", database=entry[0], table=entry[1], error=str(e))
-
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "debezium_signal table already exists, clearing table")
             self.run_query("TRUNCATE TABLE public.debezium_signal;", database)
         
         query = """
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
             id   text PRIMARY KEY,
             type text NOT NULL,
-            data jsonb,
-            table_database text,
-            stream_id text
+            data jsonb
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating debezium_signal table if not exists")
@@ -318,12 +348,6 @@ class YugabyteDBManager:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if entry exists in debezium_signal table. query: " + query + " table_id: " + table_id, table=table_info.to_dict())
         result = self.run_query(query, table_info.database, [table_id])
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry existence check in debezium_signal table completed. raw_result: " + str(result), table=table_info.to_dict())
-        query2 = """
-        select * from public.debezium_signal;
-        """
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching all entries from debezium_signal table", table=table_info.to_dict())
-        result2 = self.run_query(query2, table_info.database, None)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "All entries from debezium_signal table. entries: " + str(result2), entries=result2, table=table_info.to_dict())
         if result[0][0] > 0:
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry already exists in debezium_signal table", table_id=table_id, table=table_info.to_dict())
             return True
@@ -385,7 +409,7 @@ class YugabyteDBManager:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.to_dict())
         try:
             with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(f"TRUNCATE TABLE {table_info.schema}.{table_info.table} CASCADE")
+                cur.execute("DELETE FROM {table_info.schema}.{table_info.table} WHERE id IN (SELECT id FROM {table_info.schema}.{table_info.table});")
                 conn.commit()
         finally:
             conn.close()
