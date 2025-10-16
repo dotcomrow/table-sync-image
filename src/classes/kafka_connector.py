@@ -196,56 +196,60 @@ class KafkaConnector:
         # this method will fail if the table does not have a primary key field
         # TODO: add test to verify if connector created correctly if table has primary key
         stream_id = self.get_cdc_stream_id(table_info)
+        try:
+            # Build topic + server name consistently, so sink can subscribe correctly
+            topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
 
-        # Build topic + server name consistently, so sink can subscribe correctly
-        topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
+            source_config = {
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "tasks.max": "1",
 
-        source_config = {
-            "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-            "tasks.max": "1",
+                "database.hostname": self.host,
+                "database.port": str(self.port),
+                "database.master.addresses": self.db_master_addresses,
+                "database.user": self.user,
+                "database.password": self.password,
+                "database.dbname": table_info.database,
+                "database.server.name": server_name,
+                "database.streamid": stream_id,
 
-            "database.hostname": self.host,
-            "database.port": str(self.port),
-            "database.master.addresses": self.db_master_addresses,
-            "database.user": self.user,
-            "database.password": self.password,
-            "database.dbname": table_info.database,
-            "database.server.name": server_name,
-            "database.streamid": stream_id,
+                "table.include.list": f"{table_info.schema}.{table_info.table}",
+                "snapshot.mode": "initial",
+                "incremental.snapshot.enabled": "true",
+                "signal.data.collection": f"public.debezium_signal",
+                "incremental.snapshot.chunk.size": "10000",   # optional
 
-            "table.include.list": f"{table_info.schema}.{table_info.table}",
-            "snapshot.mode": "initial",
-            "incremental.snapshot.enabled": "true",
-            "signal.data.collection": f"public.debezium_signal",
-            "incremental.snapshot.chunk.size": "10000",   # optional
+                # Use the YB unwrap SMT (fine with Avro)
+                "transforms": "unwrap",
+                "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
+                "transforms.unwrap.delete.handling.mode": "none",
+                "column.exclude.list": f"{table_info.schema}.{table_info.table}.id",
 
-            # Use the YB unwrap SMT (fine with Avro)
-            "transforms": "unwrap",
-            "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
-            "transforms.unwrap.delete.handling.mode": "none",
-            "column.exclude.list": f"{table_info.schema}.{table_info.table}.id",
+                # Topic auto-creation hints (optional)
+                "topic.creation.default.replication.factor": "1",
+                "topic.creation.default.partitions": "1",
+                "topic.creation.default.cleanup.policy": "delete",
 
-            # Topic auto-creation hints (optional)
-            "topic.creation.default.replication.factor": "1",
-            "topic.creation.default.partitions": "1",
-            "topic.creation.default.cleanup.policy": "delete",
+                # >>> IMPORTANT: Avro + Schema Registry <<<
+                "key.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "key.converter.schema.registry.url": self.schema_registry_url,
+                "value.converter.schema.registry.url": self.schema_registry_url,
+                # Let the source register schemas automatically
+                "key.converter.auto.register.schemas": "true",
+                "value.converter.auto.register.schemas": "true",
+            }
 
-            # >>> IMPORTANT: Avro + Schema Registry <<<
-            "key.converter": "io.confluent.connect.avro.AvroConverter",
-            "value.converter": "io.confluent.connect.avro.AvroConverter",
-            "key.converter.schema.registry.url": self.schema_registry_url,
-            "value.converter.schema.registry.url": self.schema_registry_url,
-            # Let the source register schemas automatically
-            "key.converter.auto.register.schemas": "true",
-            "value.converter.auto.register.schemas": "true",
-        }
-
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector configuration", source_config=source_config, table=table_info.to_dict())
-        source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
-        response = self._send_connector_request(source_connector_name, source_config)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
-        # Insert debezium signal record
-        self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector configuration", source_config=source_config, table=table_info.to_dict())
+            source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
+            response = self._send_connector_request(source_connector_name, source_config)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
+            # Insert debezium signal record
+            self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create source connector", error=str(e), table=table_info.to_dict())
+            self.reset_connectors(table_info)
+            raise
 
 
     def create_sink_connector(self, table_info: TableInfo):
@@ -262,59 +266,64 @@ class KafkaConnector:
             raise
 
         # Derive topic/dataset/table consistently with the source
-        topic, dataset, table_name, _server_name = self._derive_topic_and_mappings(table_info)
+        try:
+            topic, dataset, table_name, _server_name = self._derive_topic_and_mappings(table_info)
 
-        sink_config = {
-            "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
-            "tasks.max": "1",
+            sink_config = {
+                "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                "tasks.max": "1",
 
-            # Topics & explicit mappings
-            "topics": topic,
-            "topic2TableMap": f"{topic}:{table_name}",
-            "project": bq_project,
-            # Optional fallback for topics without explicit dataset mapping
-            "defaultDataset": dataset,
-            # Per-topic dataset (from your COMMENT "bq": "dataset.table")
-            "datasets": f"{topic}:{dataset}",
+                # Topics & explicit mappings
+                "topics": topic,
+                "topic2TableMap": f"{topic}:{table_name}",
+                "project": bq_project,
+                # Optional fallback for topics without explicit dataset mapping
+                "defaultDataset": dataset,
+                # Per-topic dataset (from your COMMENT "bq": "dataset.table")
+                "datasets": f"{topic}:{dataset}",
 
-            # Auth
-            "keySource": "FILE",
-            "keyfile": keyfile_path,
+                # Auth
+                "keySource": "FILE",
+                "keyfile": keyfile_path,
 
-            # Table creation / schema behavior
-            "autoCreateTables": "true",
-            "autoUpdateSchemas": "false",
-            "allowNewBigQueryFields": "false",
-            "sanitizeTopics": "false",
-            "sanitizeFieldNames": "false",
+                # Table creation / schema behavior
+                "autoCreateTables": "true",
+                "autoUpdateSchemas": "false",
+                "allowNewBigQueryFields": "false",
+                "sanitizeTopics": "false",
+                "sanitizeFieldNames": "false",
 
-            # Upsert/Delete (Debezium-friendly)
-            "upsertEnabled": "true",
-            "deleteEnabled": "true",
-            # BigQuery sink needs the name of the Kafka KEY field to match on:
-            "kafkaKeyFieldName": "id",
-            # Note: primaryKeyMode is not used by this sink; matching is via the Kafka key
+                # Upsert/Delete (Debezium-friendly)
+                "upsertEnabled": "true",
+                "deleteEnabled": "true",
+                # BigQuery sink needs the name of the Kafka KEY field to match on:
+                "kafkaKeyFieldName": "id",
+                # Note: primaryKeyMode is not used by this sink; matching is via the Kafka key
 
-            # >>> IMPORTANT: Avro + Schema Registry to enable autoCreateTables <<<
-            "key.converter": "io.confluent.connect.avro.AvroConverter",
-            "value.converter": "io.confluent.connect.avro.AvroConverter",
-            "key.converter.schema.registry.url": self.schema_registry_url,
-            "value.converter.schema.registry.url": self.schema_registry_url,
+                # >>> IMPORTANT: Avro + Schema Registry to enable autoCreateTables <<<
+                "key.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "key.converter.schema.registry.url": self.schema_registry_url,
+                "value.converter.schema.registry.url": self.schema_registry_url,
 
-            # Consumer start position for new sink
-            "consumer.override.auto.offset.reset": "earliest",
+                # Consumer start position for new sink
+                "consumer.override.auto.offset.reset": "earliest",
 
-            # Retries / merges
-            "enableRetries": "true",
-            "bigQueryRetry": "6",
-            "bigQueryRetryWait": "2000",
-            "mergeIntervalMs": "60000",
-        }
+                # Retries / merges
+                "enableRetries": "true",
+                "bigQueryRetry": "6",
+                "bigQueryRetryWait": "2000",
+                "mergeIntervalMs": "60000",
+            }
 
-        self.bigquery_manager.create_dataset(table_info)
-        sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
-        response = self._send_connector_request(sink_connector_name, sink_config)
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector created", response=response, table=table_info.to_dict())
+            self.bigquery_manager.create_dataset(table_info)
+            sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
+            response = self._send_connector_request(sink_connector_name, sink_config)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector created", response=response, table=table_info.to_dict())
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create sink connector", error=str(e), table=table_info.to_dict())
+            self.reset_connectors(table_info)
+            raise
 
     def _send_connector_request(self, name: str, config: dict):
         url = f"{self.kc_url}/connectors/{name}/config"
