@@ -104,9 +104,13 @@ class TableSyncOrchestrator:
     
     def _table_sync_loop(self, db):
         logger = Logging(self.config)
+        logger.logMessage(Logging.LogLevel.INFO, "Starting table sync loop for database", database=db)
         yugabyte_manager = YugabyteDBManager(self.config, logger)
+        logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDBManager initialized", database=db)
         kafka_connector = KafkaConnector(self.config, logger)
+        logger.logMessage(Logging.LogLevel.DEBUG, "KafkaConnector initialized", database=db)
         bigquery_manager = BigQueryManager(self.config, logger)
+        logger.logMessage(Logging.LogLevel.DEBUG, "BigQueryManager initialized", database=db)
         
         tables = yugabyte_manager._discover_tables(db)
         logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables])
