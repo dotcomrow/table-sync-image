@@ -326,7 +326,7 @@ class YugabyteDBManager:
     def create_debezium_signal_table(self, database: str):
         """Create the debezium_signal and database_stream tables if they do not exist."""
         if self.table_exists(database, 'debezium_signal', 'public'):
-            self.run_query("TRUNCATE TABLE public.debezium_signal;", database)
+            self.run_query("DELETE FROM public.debezium_signal WHERE id IN (SELECT id FROM public.debezium_signal);", database)
         
         query = """
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
