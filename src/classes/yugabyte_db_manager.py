@@ -28,15 +28,14 @@ class YugabyteDBManager:
             from unittest.mock import MagicMock
             return MagicMock()
 
-        database_to_connect = database
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=database_to_connect)
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Connecting to YugabyteDB", host=self.host, port=self.port, user=self.user, database=database)
         try:
             connection = psycopg2.connect(
                 host=self.host,
                 port=self.port,
                 user=self.user,
                 password=self.password,
-                database=database_to_connect
+                database=database
             )
             with connection.cursor() as cur:
                 cur.execute("SELECT current_database();")

@@ -42,9 +42,8 @@ from classes.yugabyte_db_manager import YugabyteDBManager
 
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
-        self.config_path = config_path
         self.running = False        
-        self.config = ConfigReader(self.config_path).load_config()
+        self.config = ConfigReader(config_path).load_config()
         self.logger = Logging(self.config)
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         databases = yugabyte_manager._discover_databases("kafka")
@@ -121,7 +120,7 @@ class TableSyncOrchestrator:
                     # Table does not have entry in debezium signal table
                     # Means this is a newly annotated table so we check to see if connectors exist as they may be in a bad state
                     
-                    # but first lets check to see if there is already a teable in bigquery.
+                    # but first lets check to see if there is already a table in bigquery.
                     # this would mean that the table has been annotated and synced before
                     # so this could be a new build of the platform.
                     # what we need to do in this case is to pull the data from bigquery into the yugabyte table
@@ -189,42 +188,31 @@ class TableSyncOrchestrator:
     def start(self):
         self.running = True
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
-        try:
+        
+        while self.running:
+            start = time.time()
             try:
-                while self.running:
-                    start = time.time()
-                    try:
-                        # Discover databases and create connectors as needed
-                        databases = yugabyte_manager._discover_databases("kafka")
+                # Discover databases and create connectors as needed
+                databases = yugabyte_manager._discover_databases("kafka")
                         
-                        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
-                            futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
+                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                    futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 
-                            for future in as_completed(futures):
-                                ti = futures[future]
-                                try:
-                                    future.result()
-                                except Exception as e:
-                                    error=str(e)
-                                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", database=ti, error=error)
+                    for future in as_completed(futures):
+                        ti = futures[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            error=str(e)
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", database=ti, error=error)
 
-                    except Exception as e:
-                        error=str(e)
-                        self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
-                    finally:
-                        elapsed = time.time() - start
-                        self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed)
-                        time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
-                        
             except Exception as e:
                 error=str(e)
-                self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in table sync loop", error=error)
-
-        except Exception as e:
-            error=str(e)
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Unexpected error in orchestrator", error=error)
-        finally:
-            self.running = False
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
+            finally:
+                elapsed = time.time() - start
+                self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed)
+                time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
 
 # ----------------------------- Main Entry -----------------------------
 
