@@ -215,7 +215,10 @@ class TableSyncOrchestrator:
                 self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
             finally:
                 elapsed = time.time() - start
-                self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed)
+                minutes = int(elapsed // 60)
+                seconds = elapsed % 60
+                print(f"Scan loop complete, elapsed time: {minutes}m {seconds:.2f}s")
+                self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed, elapsed_formatted=f"{minutes}m {seconds:.2f}s")
                 time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
 
 # ----------------------------- Main Entry -----------------------------
