@@ -214,6 +214,7 @@ class KafkaConnector:
             "database.streamid": stream_id,
 
             "table.include.list": f"{table_info.schema}.{table_info.table}",
+            "table.exclude.list": "public.debezium_signal",  # exclude the signal table
             "snapshot.mode": "initial",
             "incremental.snapshot.enabled": "true",
             "signal.data.collection": f"public.debezium_signal",
