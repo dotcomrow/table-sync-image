@@ -360,7 +360,6 @@ class YugabyteDBManager:
         query = """
         SELECT DISTINCT data->>'data-collections' AS table_name
         FROM public.debezium_signal
-        WHERE table_database = %s;
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching table entries from debezium_signal table", database=database)
         result = self.run_query(query, database, [database])
@@ -372,11 +371,11 @@ class YugabyteDBManager:
             query = """
             SELECT COUNT(*) 
             FROM public.debezium_signal
-            WHERE table_database = %s AND data->>'data-collections' = %s;
+            WHERE data->>'data-collections' = %s;
             """
             table_identifier = f"{database}.{table}"
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if stream is in use for other tables", database=database, table=table)
-            result = self.run_query(query, database, [database, table_identifier])
+            result = self.run_query(query, database, [table_identifier])
             count = result[0][0] if result else 0
             in_use = count > 1  # If more than one entry exists, the stream is in use by other tables
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream usage check completed", in_use=in_use)
@@ -394,12 +393,12 @@ class YugabyteDBManager:
             return
         query = """
         DELETE FROM public.debezium_signal
-        WHERE table_database = %s AND data->>'data-collections' = %s;
+        WHERE data->>'data-collections' = %s;
         """
         table_identifier = f"{database}.{table}"
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing entry from debezium_signal table", database=database, table=table)
         try:
-            self.run_query(query, database, [database, table_identifier])
+            self.run_query(query, database, [table_identifier])
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry removed successfully from debezium_signal table", database=database, table=table)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
