@@ -106,7 +106,7 @@ class TableSyncOrchestrator:
             yugabyte_manager.create_debezium_signal_table(db)
             yugabyte_manager.create_stream_table(db)
             stream_id = yugabyte_manager.create_stream(db)
-            yugabyte_manager.insert_into_stream_table(db, stream_id)
+            yugabyte_manager.insert_into_stream_table(stream_id, db)
             logger.logMessage(Logging.LogLevel.DEBUG, "Debezium signal table ensured", database=db)
         except Exception as e:
             logger.logMessage(Logging.LogLevel.ERROR, "Error preparing database", database=db, error=str(e))
