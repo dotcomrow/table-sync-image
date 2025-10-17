@@ -11,6 +11,9 @@ from classes.yugabyte_db_manager import YugabyteDBManager
 from classes.logging import Logging
 
 class KafkaConnector:
+    source_connector_name_format = "yb-source-{database}-{schema}-{table_name}"
+    sink_connector_name_format = "bq-sink-{database}-{table_name}"
+    
     def __init__(self, config, logging: Logging):
         self.config = config
         self.mock_enabled=self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.MOCK.value, False)
@@ -28,7 +31,10 @@ class KafkaConnector:
     
     def delete_sink_cdc_connector(self, table_info: TableInfo):
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting sink CDC connector", table=table_info.to_dict())
-        sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
+        sink_connector_name = self.sink_connector_name_format.format(
+            database=table_info.database,
+            table_name=table_info.table
+        )
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
@@ -46,7 +52,11 @@ class KafkaConnector:
 
     def delete_source_cdc_connector(self, table_info: TableInfo):
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Deleting source CDC connector", table=table_info.to_dict())
-        source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
+        source_connector_name = self.source_connector_name_format.format(
+            database=table_info.database,
+            schema=table_info.schema,
+            table_name=table_info.table
+        )
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
@@ -63,8 +73,15 @@ class KafkaConnector:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=source_connector_name, table=table_info.to_dict())
 
     def check_connector_exists(self, table_info: TableInfo) -> bool:
-        source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
-        sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
+        source_connector_name = self.source_connector_name_format.format(
+            database=table_info.database,
+            schema=table_info.schema,
+            table_name=table_info.table
+        )
+        sink_connector_name = self.sink_connector_name_format.format(
+            database=table_info.database,
+            table_name=table_info.table
+        )
 
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if Kafka connectors exist", source_connector_name=source_connector_name, sink_connector_name=sink_connector_name, table=table_info.to_dict())
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
@@ -194,7 +211,11 @@ class KafkaConnector:
             }
 
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector configuration", source_config=source_config, table=table_info.to_dict())
-            source_connector_name = f"yb-source-{table_info.database}-{table_info.schema}-{table_info.table}"
+            source_connector_name = self.source_connector_name_format.format(
+                database=table_info.database,
+                schema=table_info.schema,
+                table_name=table_info.table
+            )
             response = self._send_connector_request(source_connector_name, source_config)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
             # Insert debezium signal record
@@ -270,7 +291,10 @@ class KafkaConnector:
             }
 
             self.bigquery_manager.create_dataset(table_info)
-            sink_connector_name = f"bq-sink-{table_info.database}-{table_info.table}"
+            sink_connector_name = self.sink_connector_name_format.format(
+                database=table_info.database,
+                table_name=table_info.table
+            )
             response = self._send_connector_request(sink_connector_name, sink_config)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector created", response=response, table=table_info.to_dict())
         except Exception as e:
