@@ -399,11 +399,6 @@ class YugabyteDBManager:
     
     def remove_entry_from_debezium_signal(self, database: str, table: str):
         """Remove an entry from the debezium_signal table."""
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Removal requested from debezium signal, checking to see if stream is in use for other tables", database=database, table=table)
-        in_use = self.check_stream_in_use(database, table)
-        if in_use:
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream is still in use by other tables, skipping removal", database=database, table=table)
-            return
         query = """
         DELETE FROM public.debezium_signal
         WHERE data->>'data-collections' = %s;
