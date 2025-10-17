@@ -1,5 +1,5 @@
 import unittest
-from classes.bigquery_manager import BigQueryManager
+from services.bigquery_manager import BigQueryManager
 
 class TestBigQueryManager(unittest.TestCase):
     def setUp(self):

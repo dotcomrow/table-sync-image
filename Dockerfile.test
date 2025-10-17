@@ -38,7 +38,7 @@ WORKDIR /app
 RUN chown cdc_user:cdc_user /app
 
 # --- Python deps (cached layer) ---
-COPY src/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN git config --global user.name "YourUsername" && \

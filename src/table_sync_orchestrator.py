@@ -29,14 +29,15 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Optional
-
 from flask import Flask, jsonify
+
+from classes.ybadmin_utils import YBAdminUtils
 from classes.table_info import TableInfo
 from classes.logging import Logging
-from classes.kafka_connector import KafkaConnector
-from classes.bigquery_manager import BigQueryManager
+from services.kafka_connector import KafkaConnector
+from services.bigquery_manager import BigQueryManager
 from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, HealthCheckKeys
-from classes.yugabyte_db_manager import YugabyteDBManager
+from services.yugabyte_db_manager import YugabyteDBManager
 
 # ----------------------------- Orchestrator -----------------------------
 
@@ -45,6 +46,7 @@ class TableSyncOrchestrator:
         self.running = False        
         self.config = ConfigReader(config_path).load_config()
         self.logger = Logging(self.config)
+        self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         databases = yugabyte_manager._discover_databases("kafka")
         for db in databases:
@@ -109,7 +111,7 @@ class TableSyncOrchestrator:
                 logger.logMessage(Logging.LogLevel.DEBUG, "Stream already exists for database, skipping creation", database=db)
                 return  # Stop preparation if stream exists
             
-            stream_id = yugabyte_manager.create_stream(db)
+            stream_id = self.yb_admin_utils.create_stream(db)
             yugabyte_manager.insert_into_stream_table(stream_id, db)
             logger.logMessage(Logging.LogLevel.DEBUG, "Debezium signal table ensured", database=db)
         except Exception as e:

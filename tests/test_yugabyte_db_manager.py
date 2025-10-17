@@ -4,7 +4,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../sample')))
 from classes.config_reader import ConfigReader
-from classes.yugabyte_db_manager import YugabyteDBManager
+from services.yugabyte_db_manager import YugabyteDBManager
 from classes.table_info import TableInfo
 
 class TestYugabyteDBManager(unittest.TestCase):

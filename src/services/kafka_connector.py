@@ -1,13 +1,10 @@
 import requests
-import re
-import subprocess
-import os
 import json
 import time
-from classes.bigquery_manager import BigQueryManager
+from services.bigquery_manager import BigQueryManager
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
-from classes.yugabyte_db_manager import YugabyteDBManager
+from services.yugabyte_db_manager import YugabyteDBManager
 from classes.logging import Logging
 
 class KafkaConnector:
@@ -84,7 +81,7 @@ class KafkaConnector:
             table_name=table_info.table
         )
 
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if Kafka connectors exist", source_connector_name=source_connector_name, sink_connector_name=sink_connector_name, table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.INFO, "Checking if Kafka connectors exist", source_connector_name=source_connector_name, sink_connector_name=sink_connector_name, table=table_info.to_dict())
         kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
         if not kc:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Kafka Connect URL not configured", table=table_info.to_dict())
@@ -92,7 +89,6 @@ class KafkaConnector:
 
         source_exists = False
         url = f"{kc}/connectors/{source_connector_name}/status"
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect status URL", url=url, table=table_info.to_dict())
         try:
             response = requests.get(url, timeout=10)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Kafka Connect source status response", status_code=response.status_code, response_text=response.text, table=table_info.to_dict())
@@ -112,10 +108,11 @@ class KafkaConnector:
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Exception while checking connector existence", error=str(e), table=table_info.to_dict())
 
+        self.logger.logMessage(Logging.LogLevel.INFO, "Connector existence check completed", source_exists=source_exists, sink_exists=sink_exists, table=table_info.to_dict())
         return {"source_exists": source_exists, "sink_exists": sink_exists}
         
     def reset_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Resetting Kafka connectors for table", table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.INFO, "Resetting Kafka connectors for table", table=table_info.to_dict())
         status = self.check_connector_exists(table_info)
         if status.get("source_exists"):
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector exists, deleting", table=table_info.to_dict())
@@ -126,7 +123,7 @@ class KafkaConnector:
             self.delete_sink_cdc_connector(table_info)
         
     def setup_connectors(self, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Setting up Kafka connectors for table", table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.INFO, "Setting up Kafka connectors for table", table=table_info.to_dict())
         self.create_source_connector(table_info)
         self.create_sink_connector(table_info)
         
@@ -157,16 +154,15 @@ class KafkaConnector:
         dataset = getattr(table_info.annotation, "bq_dataset", None)
         table   = getattr(table_info.annotation, "bq_table", None)
         if not (dataset and table):
-            # default fallback: put into a catch-all dataset and keep table name
-            dataset = getattr(self, "default_bq_dataset", "raw")
-            table   = table_info.table
+            raise ValueError("BigQuery dataset and table must be specified")
 
         return topic, dataset, table, server_name
 
     def create_source_connector(self, table_info: TableInfo):
-        # this method will fail if the table does not have a primary key field
-        # TODO: add test to verify if connector created correctly if table has primary key
-        stream_id = self.yugabyte_manager.get_cdc_stream_id(table_info)
+        self.logger.logMessage(Logging.LogLevel.INFO, "Creating source connector for table", table=table_info.to_dict())
+        stream_id = self.yugabyte_manager.stream_exists(table_info)
+        if not stream_id:
+            raise ValueError("CDC stream does not exist for the database", table=table_info.to_dict())
         try:
             # Build topic + server name consistently, so sink can subscribe correctly
             topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
@@ -218,7 +214,7 @@ class KafkaConnector:
                 table_name=table_info.table
             )
             response = self._send_connector_request(source_connector_name, source_config)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
+            self.logger.logMessage(Logging.LogLevel.INFO, "Source connector created", response=response, table=table_info.to_dict())
             # Insert debezium signal record
             if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
                 self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)

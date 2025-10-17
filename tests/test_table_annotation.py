@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../sample')))
 from classes.table_annotation import TableAnnotation
-from classes.config_reader import ConfigReader, BigQueryKeys
+from classes.config_reader import ConfigReader
 
 class TestTableAnnotation(unittest.TestCase):
     def setUp(self):

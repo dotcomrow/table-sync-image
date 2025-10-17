@@ -4,7 +4,6 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
-from classes.config_reader import ConfigReader
 
 class TestTableInfo(unittest.TestCase):
     def setUp(self):
