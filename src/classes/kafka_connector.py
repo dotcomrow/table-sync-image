@@ -219,6 +219,9 @@ class KafkaConnector:
             response = self._send_connector_request(source_connector_name, source_config)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
             # Insert debezium signal record
+            if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info)
+                
             self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create source connector", error=str(e), table=table_info.to_dict())
