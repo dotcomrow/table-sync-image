@@ -70,7 +70,8 @@ class KafkaConnector:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to delete connector", response_text=response.text, table=table_info.to_dict())
             raise RuntimeError(f"Failed to delete connector: {response.text}")
 
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully", connector_name=source_connector_name, table=table_info.to_dict())
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC connector deleted successfully, removing entry from debezium signal", connector_name=source_connector_name, table=table_info.to_dict())
+        self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
 
     def check_connector_exists(self, table_info: TableInfo) -> bool:
         source_connector_name = self.source_connector_name_format.format(
