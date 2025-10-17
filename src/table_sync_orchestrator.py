@@ -105,6 +105,10 @@ class TableSyncOrchestrator:
         try:
             yugabyte_manager.create_debezium_signal_table(db)
             yugabyte_manager.create_stream_table(db)
+            if yugabyte_manager.stream_exists(db) is not None:
+                logger.logMessage(Logging.LogLevel.DEBUG, "Stream already exists for database, skipping creation", database=db)
+                return  # Stop preparation if stream exists
+            
             stream_id = yugabyte_manager.create_stream(db)
             yugabyte_manager.insert_into_stream_table(stream_id, db)
             logger.logMessage(Logging.LogLevel.DEBUG, "Debezium signal table ensured", database=db)

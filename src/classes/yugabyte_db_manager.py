@@ -299,14 +299,22 @@ class YugabyteDBManager:
             self.logger.logMessage(Logging.LogLevel.ERROR, "No existing stream ID found in database_stream table, stream should already exist!", table=table_info.to_dict())
             raise RuntimeError("No existing stream ID found in database_stream table")
         
-    def insert_into_stream_table(self, stream_id: str, database: str):
+    def stream_exists(self, database: str) -> bool:
         select_query = """
-        SELECT stream_id FROM public.database_stream WHERE stream_id = %s;
+        SELECT * FROM public.database_stream;
         """
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if stream ID already exists in database_stream table", stream_id=stream_id)
-        existing = self.run_query(select_query, database, [stream_id])
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Checking if stream exists in database_stream table")
+        existing = self.run_query(select_query, database, None)
         if existing:
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream ID already exists in database_stream table.  Review why this happened as this function should not be called if a stream already exists for this db", current_stream_id=existing[0][0])
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream exists in database_stream table", count=len(existing))
+            return existing[0][0]
+        else:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "No stream exists in database_stream table")
+            return None
+        
+    def insert_into_stream_table(self, stream_id: str, database: str):
+        if self.stream_exists(database) is not None:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Stream ID already exists in database_stream table.  Review why this happened as this function should not be called if a stream already exists for this db", current_stream_id=stream_id)
             return
             
         query = """
