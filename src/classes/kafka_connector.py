@@ -220,7 +220,7 @@ class KafkaConnector:
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Source connector created", response=response, table=table_info.to_dict())
             # Insert debezium signal record
             if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info)
+                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
                 
             self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
         except Exception as e:
