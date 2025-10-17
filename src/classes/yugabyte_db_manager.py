@@ -238,19 +238,17 @@ class YugabyteDBManager:
     def insert_debezium_signal(self, table_info: TableInfo, stream_id: str):
         """Insert a record into the public.debezium_signal table."""
         query = """
-        INSERT INTO public.debezium_signal (id, type, data, table_database, stream_id)
+        INSERT INTO public.debezium_signal (id, type, data)
         VALUES (
           %s,
           'execute-snapshot',
-          %s,
-          %s,
           %s
         );
         """
         data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id, table=table_info.to_dict())
         try:
-            self.run_query(query, table_info.database, [f'snap_{table_info.schema}_{table_info.table}', data, table_info.database, stream_id])
+            self.run_query(query, table_info.database, [f'snap_{table_info.schema}_{table_info.table}', data])
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Record inserted successfully", table_name=table_info.table, table=table_info.to_dict())
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e), table=table_info.to_dict())
