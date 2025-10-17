@@ -229,6 +229,7 @@ class TableSyncOrchestrator:
                     self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", response=ti, error=error)
         
         while self.running:
+            self.logger.logMessage(Logging.LogLevel.INFO, "Starting scan loop for all databases")
             start = time.time()
             try:
                 with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:

@@ -4,7 +4,7 @@ import logging
 from uuid import uuid4
 from typing import Optional, Any
 
-from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys, BigQueryKeys, YugabyteDBKeys
+from classes.config_reader import ConfigKeys, ConfigReader, LoggingKeys, BigQueryKeys
 
 try:
     from google.cloud import logging as cloud_logging

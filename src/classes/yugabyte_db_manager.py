@@ -278,7 +278,8 @@ class YugabyteDBManager:
         
         query = """
         CREATE TABLE IF NOT EXISTS public.database_stream (
-            stream_id text PRIMARY KEY
+            stream_id text PRIMARY KEY,
+            created_at timestamptz DEFAULT now()
         )
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating database_stream table if not exists")
@@ -338,7 +339,8 @@ class YugabyteDBManager:
         CREATE TABLE IF NOT EXISTS public.debezium_signal (
             id   text PRIMARY KEY,
             type text NOT NULL,
-            data jsonb
+            data jsonb,
+            created_at timestamptz DEFAULT now()
         );
         """
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating debezium_signal table if not exists")
