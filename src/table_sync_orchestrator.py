@@ -25,10 +25,10 @@ import sys
 import threading
 import time
 import os
-
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 from flask import Flask, jsonify
 
 from classes.ybadmin_utils import YBAdminUtils
@@ -50,6 +50,12 @@ class TableSyncOrchestrator:
         self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         self.redis_cache = RedisService(self.config, self.logger)
+        self.bigquery_manager = BigQueryManager(self.config, self.logger)
+        
+        # Background task management
+        self._background_threads = []
+        self._background_shutdown = threading.Event()
+        
         databases = yugabyte_manager._discover_databases("kafka")
         for db in databases:
             yugabyte_manager.create_debezium_signal_table(db)
@@ -78,6 +84,105 @@ class TableSyncOrchestrator:
         threading.Thread(target=run_server, daemon=True).start()
         print(f"Health server started, port {port}")
         
+    # ------------------------------ Background Task Management ------------------------------
+    
+    def _background_database_preparation(self, databases: List[str]):
+        """Run database preparation in background thread."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting background database preparation", databases=databases)
+        
+        try:
+            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
+                futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+                
+                for future in as_completed(futures):
+                    if self._background_shutdown.is_set():
+                        break
+                    db = futures[future]
+                    try:
+                        future.result()
+                        self.logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation completed", database=db)
+                    except Exception as e:
+                        error = str(e)
+                        self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", database=db, error=error)
+            
+            self.logger.logMessage(Logging.LogLevel.INFO, "Background database preparation completed")
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Critical error in background database preparation", error=str(e))
+    
+    def _background_cache_checking(self, databases: List[str]):
+        """Run cache checking continuously in background thread."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting background cache checking", databases=databases)
+        
+        cache_check_interval = self.config.get(ConfigKeys.PROCESSING.value, {}).get('cache_check_interval_seconds', 60)
+        
+        while not self._background_shutdown.is_set():
+            try:
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Running cache check cycle")
+                
+                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
+                    futures = {executor.submit(self.check_cache_counts, db, self.logger, self.config): db for db in databases}
+                    
+                    for future in as_completed(futures):
+                        if self._background_shutdown.is_set():
+                            break
+                        db = futures[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            error = str(e)
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in cache checking", database=db, error=error)
+                
+                # Wait for next cycle or shutdown signal
+                self._background_shutdown.wait(timeout=cache_check_interval)
+                
+            except Exception as e:
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Error in background cache checking cycle", error=str(e))
+                # Wait a bit before retrying
+                self._background_shutdown.wait(timeout=30)
+        
+        self.logger.logMessage(Logging.LogLevel.INFO, "Background cache checking stopped")
+    
+    def _start_background_tasks(self, databases: List[str]):
+        """Start background tasks for database preparation and cache checking."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting background tasks")
+        
+        # Start database preparation thread (must complete before main loop)
+        prep_thread = threading.Thread(
+            target=self._background_database_preparation,
+            args=(databases,),
+            daemon=False,  # Not daemon - we need to wait for completion
+            name="DatabasePreparation"
+        )
+        prep_thread.start()
+        
+        # Wait for database preparation to complete
+        prep_thread.join()
+        self.logger.logMessage(Logging.LogLevel.INFO, "Database preparation completed, starting cache checking")
+        
+        # Start cache checking thread (runs continuously in background)
+        cache_thread = threading.Thread(
+            target=self._background_cache_checking,
+            args=(databases,),
+            daemon=True,  # Daemon thread - can be killed when main exits
+            name="CacheChecking"
+        )
+        cache_thread.start()
+        self._background_threads.append(cache_thread)
+        
+        self.logger.logMessage(Logging.LogLevel.INFO, "Background tasks started")
+    
+    def _stop_background_tasks(self):
+        """Signal background tasks to stop and wait for completion."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Stopping background tasks")
+        self._background_shutdown.set()
+        
+        # Wait for non-daemon background threads to complete
+        for thread in self._background_threads:
+            if thread.is_alive() and not thread.daemon:
+                thread.join(timeout=30)  # Wait up to 30 seconds
+        
+        self.logger.logMessage(Logging.LogLevel.INFO, "Background tasks stopped")
+        
     # ------------------------------ Cache Check Thread ------------------------------
     
     def check_cache_counts(self, db: str, logger: Logging, config: ConfigReader):
@@ -85,27 +190,35 @@ class TableSyncOrchestrator:
         yugabyte_manager = YugabyteDBManager(config, logger)
         tables: list[TableInfo] = yugabyte_manager._discover_tables(db)
         try:
-            for table_info in tables:
-                redis_val = self.redis_cache.get(
-                    self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
-                    self.redis_cache.table_count_key_format.format(
-                        db=table_info.database, 
-                        table_info=table_info)
-                )
-                if redis_val is not None:
-                    logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val)
-                    if self.bigquery_manager.get_row_count(table_info) == redis_val:
-                        logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val)
-                        self.redis_cache.delete(
-                            self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
-                            self.redis_cache.table_count_key_format.format(
-                                db=table_info.database, 
-                                table_info=table_info)
-                        )
-                        yugabyte_manager.remove_entry_from_debezium_signal(db, table_info.table)
-                        
+            while True:
+                start = time.time()
+                for table_info in tables:
+                    redis_val = self.redis_cache.get(
+                        self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
+                        self.redis_cache.table_count_key_format.format(
+                            db=table_info.database, 
+                            table_info=table_info)
+                    )
+                    if redis_val is not None:
+                        logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val)
+                        if self.bigquery_manager.get_row_count(table_info) == redis_val:
+                            logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val)
+                            self.redis_cache.delete(
+                                self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
+                                self.redis_cache.table_count_key_format.format(
+                                    db=table_info.database, 
+                                    table_info=table_info)
+                            )
+                            yugabyte_manager.remove_entry_from_debezium_signal(db, table_info.table)
+                            
                 # Logic to check cached counts and compare with BigQuery
                 logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info)
+                # Sleep for the configured interval
+                elapsed = time.time() - start
+                sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    
         except Exception as e:
             logger.logMessage(Logging.LogLevel.ERROR, "Error checking cache counts", database=db, error=str(e))
         
@@ -184,62 +297,70 @@ class TableSyncOrchestrator:
     # ----------------------------- Main Loop -----------------------------
 
     def start(self):
+        """Start the orchestrator with background tasks and main scan loop."""
         self.running = True
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         databases = yugabyte_manager._discover_databases()
         print(f"Discovered databases: {databases}")
-        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
-            futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
-            
-            for future in as_completed(futures):
-                ti = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    error=str(e)
-                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", response=ti, error=error)
-                    
-        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
-            futures = {executor.submit(self.check_cache_counts, db, self.logger, self.config): db for db in databases}
-            
-            for future in as_completed(futures):
-                ti = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    error=str(e)
-                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", response=ti, error=error)
         
-        while self.running:
-            self.logger.logMessage(Logging.LogLevel.INFO, "Starting scan loop for all databases")
-            start = time.time()
-            try:
-                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
-                    futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
+        try:
+            # Start background tasks (database preparation will complete before returning)
+            self._start_background_tasks(databases)
+            
+            # Main scan loop - runs after database preparation is complete
+            self.logger.logMessage(Logging.LogLevel.INFO, "Starting main scan loop")
+            
+            while self.running:
+                self.logger.logMessage(Logging.LogLevel.INFO, "Starting scan loop for all databases")
+                start = time.time()
+                
+                try:
+                    with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                        futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 
-                    for future in as_completed(futures):
-                        ti = futures[future]
-                        try:
-                            future.result()
-                        except Exception as e:
-                            error=str(e)
-                            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", database=ti, error=error)
+                        for future in as_completed(futures):
+                            db = futures[future]
+                            try:
+                                future.result()
+                            except Exception as e:
+                                error = str(e)
+                                self.logger.logMessage(Logging.LogLevel.ERROR, "Error in table sync loop", database=db, error=error)
 
-            except Exception as e:
-                error=str(e)
-                self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
-            finally:
-                elapsed = time.time() - start
-                minutes = int(elapsed // 60)
-                seconds = elapsed % 60
-                print(f"Scan loop complete, elapsed time: {minutes}m {seconds:.2f}s")
-                self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed, elapsed_formatted=f"{minutes}m {seconds:.2f}s")
-                time.sleep(max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed))
+                except Exception as e:
+                    error = str(e)
+                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error during table sync", error=error)
+                finally:
+                    elapsed = time.time() - start
+                    minutes = int(elapsed // 60)
+                    seconds = elapsed % 60
+                    print(f"Scan loop complete, elapsed time: {minutes}m {seconds:.2f}s")
+                    self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed, elapsed_formatted=f"{minutes}m {seconds:.2f}s")
+                    
+                    # Sleep for the configured interval
+                    sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+        
+        except KeyboardInterrupt:
+            self.logger.logMessage(Logging.LogLevel.INFO, "Received interrupt signal, shutting down")
+            self.running = False
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Critical error in main loop", error=str(e))
+            self.running = False
+        finally:
+            # Clean shutdown
+            self._stop_background_tasks()
+            self.logger.logMessage(Logging.LogLevel.INFO, "Orchestrator shutdown complete")
+
+    def stop(self):
+        """Gracefully stop the orchestrator."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Stopping orchestrator")
+        self.running = False
+        self._stop_background_tasks()
 
 # ----------------------------- Main Entry -----------------------------
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Table Sync Orchestrator for YugabyteDB → BigQuery")
     parser.add_argument("config", help="Path to the configuration file")
     parser.add_argument("--no-start", action="store_true", help="Load config and exit (for testing)")
@@ -253,9 +374,11 @@ def main():
     try:
         orchestrator.start()
     except KeyboardInterrupt:
-        orchestrator.running = False
+        print("Received interrupt signal, shutting down gracefully...")
+        orchestrator.stop()
     except Exception as e:
         print(f"Unexpected error in orchestrator: {e}", file=sys.stderr)
+        orchestrator.stop()
         sys.exit(1)
 
 if __name__ == "__main__":
