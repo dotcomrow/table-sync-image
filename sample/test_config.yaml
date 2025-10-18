@@ -9,9 +9,9 @@ yugabytedb:
   excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
 
 redis:
-  url: redis://redis:6379/0  # Added Redis configuration
-  cacheKey: "table-sync-cache"  # Example cache key
-  default_ttl: 300  # Default TTL for cache entries in seconds
+  url: redis://:<path:secret/data/redis#password>@redis-0.redis-headless.redis.svc.cluster.local:6379/0
+  cacheKey: "table-sync-cache"
+  default_ttl: 300
   cache_keys:
     row_counts: "row_counts"
 
