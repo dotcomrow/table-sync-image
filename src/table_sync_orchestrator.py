@@ -186,7 +186,7 @@ class TableSyncOrchestrator:
     # ------------------------------ Cache Check Thread ------------------------------
     
     def check_cache_counts(self, db: str, logger: Logging, config: ConfigReader):
-        self.logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db)
+        self.logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
         tables: list[TableInfo] = yugabyte_manager._discover_tables(db)
         try:
@@ -200,9 +200,9 @@ class TableSyncOrchestrator:
                             table_info=table_info)
                     )
                     if redis_val is not None:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val)
+                        logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val, thread=threading.current_thread().name)
                         if self.bigquery_manager.get_row_count(table_info) == redis_val:
-                            logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val)
+                            logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val, thread=threading.current_thread().name)
                             self.redis_cache.delete(
                                 self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
                                 self.redis_cache.table_count_key_format.format(
@@ -212,7 +212,7 @@ class TableSyncOrchestrator:
                             yugabyte_manager.remove_entry_from_debezium_signal(db, table_info.table)
                             
                 # Logic to check cached counts and compare with BigQuery
-                logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info)
+                logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info.to_dict(), thread=threading.current_thread().name)
                 # Sleep for the configured interval
                 elapsed = time.time() - start
                 sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
@@ -225,50 +225,50 @@ class TableSyncOrchestrator:
     # ------------------------------ Prepare Database Thread ------------------------------
             
     def prepare_database(self, db: str, logger: Logging, config: ConfigReader):
-        self.logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db)
+        self.logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
         try:
             yugabyte_manager.create_debezium_signal_table(db)
             yugabyte_manager.create_stream_table(db)
             if yugabyte_manager.stream_exists(db) is not None:
-                logger.logMessage(Logging.LogLevel.DEBUG, "Stream already exists for database, skipping creation", database=db)
+                logger.logMessage(Logging.LogLevel.DEBUG, "Stream already exists for database, skipping creation", database=db, thread=threading.current_thread().name)
                 return  # Stop preparation if stream exists
             
             stream_id = self.yb_admin_utils.create_stream(db)
             yugabyte_manager.insert_into_stream_table(stream_id, db)
-            logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation complete", database=db)
+            logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation complete", database=db, thread=threading.current_thread().name)
         except Exception as e:
-            logger.logMessage(Logging.LogLevel.ERROR, "Error preparing database", database=db, error=str(e))
+            logger.logMessage(Logging.LogLevel.ERROR, "Error preparing database", database=db, error=str(e), thread=threading.current_thread().name)
 
     # ----------------------------- Orchestrator Loop Thread-----------------------------
     
     def _table_sync_loop(self, db):
         logger = Logging(self.config)
-        logger.logMessage(Logging.LogLevel.INFO, "Starting table sync loop for database", database=db)
+        logger.logMessage(Logging.LogLevel.INFO, "Starting table sync loop for database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(self.config, logger)
-        logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDBManager initialized", database=db)
+        logger.logMessage(Logging.LogLevel.DEBUG, "YugabyteDBManager initialized", database=db, thread=threading.current_thread().name)
         kafka_connector = KafkaConnector(self.config, logger)
-        logger.logMessage(Logging.LogLevel.DEBUG, "KafkaConnector initialized", database=db)
+        logger.logMessage(Logging.LogLevel.DEBUG, "KafkaConnector initialized", database=db, thread=threading.current_thread().name)
         bigquery_manager = BigQueryManager(self.config, logger)
-        logger.logMessage(Logging.LogLevel.DEBUG, "BigQueryManager initialized", database=db)
-        
+        logger.logMessage(Logging.LogLevel.DEBUG, "BigQueryManager initialized", database=db, thread=threading.current_thread().name)
+
         tables = yugabyte_manager._discover_tables(db)
-        logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables])
+        logger.logMessage(Logging.LogLevel.DEBUG, "Tables discovered", database=db, tables=[t.table for t in tables], thread=threading.current_thread().name)
 
         for table_info in tables:
             try:
-                logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info.to_dict())
+                logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info.to_dict(), thread=threading.current_thread().name)
                 # for each table in the database check if it has annotation enabled
                 if table_info.annotation is not None and table_info.annotation.enabled:
                     # Table is annotated and enabled, check to see if connectors exist
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
-                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled, setting up sync", table=table_info.to_dict())
+                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled, setting up sync", table=table_info.to_dict(), thread=threading.current_thread().name)
                         # Create BigQuery dataset if not exists
                         bigquery_manager.create_dataset(table_info)
                         # get yugabyte table record count to verify snapshot success
                         if yugabyte_manager.get_row_count(table_info) > 0:
-                            logger.logMessage(Logging.LogLevel.DEBUG, "Yugabyte table has data, caching record count to verify later with bigquery count", table=table_info.to_dict())
+                            logger.logMessage(Logging.LogLevel.DEBUG, "Yugabyte table has data, caching record count to verify later with bigquery count", table=table_info.to_dict(), thread=threading.current_thread().name)
                             self.redis_cache.set(self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
                                 self.redis_cache.table_count_key_format.format(
                                     db=table_info.database, 
@@ -281,17 +281,17 @@ class TableSyncOrchestrator:
                         # Create sink connector
                         kafka_connector.create_sink_connector(table_info)
                     elif connector_statuses['source_exists'] and not connector_statuses['sink_exists']:
-                        logger.logMessage(Logging.LogLevel.INFO, "Source connector exists but sink connector missing, creating sink connector", table=table_info.to_dict())
+                        logger.logMessage(Logging.LogLevel.INFO, "Source connector exists but sink connector missing, creating sink connector", table=table_info.to_dict(), thread=threading.current_thread().name)
                         kafka_connector.create_sink_connector(table_info)
                     elif not connector_statuses['source_exists'] and connector_statuses['sink_exists']:
-                        logger.logMessage(Logging.LogLevel.INFO, "Sink connector exists but source connector missing, creating source connector", table=table_info.to_dict())
+                        logger.logMessage(Logging.LogLevel.INFO, "Sink connector exists but source connector missing, creating source connector", table=table_info.to_dict(), thread=threading.current_thread().name)
                         kafka_connector.create_source_connector(table_info)
-                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled and connectors exist, no action needed", table=table_info.to_dict())
+                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled and connectors exist, no action needed", table=table_info.to_dict(), thread=threading.current_thread().name)
                 else:
-                    logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, removing any existing setup if present", table=table_info.to_dict())
+                    logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, removing any existing setup if present", table=table_info.to_dict(), thread=threading.current_thread().name)
                     
             except Exception as e:
-                logger.logMessage(Logging.LogLevel.ERROR, "Error processing table", table=table_info.to_dict(), error=str(e))
+                logger.logMessage(Logging.LogLevel.ERROR, "Error processing table", table=table_info.to_dict(), error=str(e), thread=threading.current_thread().name)
                 continue
 
     # ----------------------------- Main Loop -----------------------------
