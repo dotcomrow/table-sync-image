@@ -257,6 +257,9 @@ class KafkaConnector:
                 # Per-topic dataset (from your COMMENT "bq": "dataset.table")
                 "datasets": f"{topic}:{dataset}",
 
+                "allowNewBigQueryFields": "true",
+                "allowBigQueryRequiredFieldRelaxation": "true",
+
                 # Auth
                 "keySource": "FILE",
                 "keyfile": keyfile_path,
