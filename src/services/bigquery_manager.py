@@ -63,3 +63,16 @@ class BigQueryManager:
         query_job = self.client.query(query)
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Query executed successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, total_rows=query_job.result().total_rows, table=table_info.to_dict())
         return [dict(row) for row in query_job]
+    
+    def get_table_row_count(self, table_info: TableInfo) -> int:
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Getting row count from BigQuery", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, table=table_info.to_dict())
+        self._initialize_client()
+        query = f"SELECT COUNT(*) as row_count FROM `{table_info.bq_dataset}.{table_info.bq_table}`"
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Executing row count query in BigQuery", query=query)
+        query_job = self.client.query(query)
+        result = query_job.result()
+        row_count = 0
+        for row in result:
+            row_count = row['row_count']
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Row count retrieved successfully", dataset_id=table_info.bq_dataset, table_id=table_info.bq_table, row_count=row_count, table=table_info.to_dict())
+        return row_count

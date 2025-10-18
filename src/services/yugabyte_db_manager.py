@@ -167,24 +167,73 @@ class YugabyteDBManager:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to discover tables", database=database, error=str(e))
         return out
 
-    def insert_debezium_signal(self, table_info: TableInfo, stream_id: str):
-        """Insert a record into the public.debezium_signal table."""
+    def insert_debezium_signal(self, table_info: TableInfo, stream_id: str, signal_type: str = "execute-snapshot", auto_cleanup_after_seconds: int = None):
+        """
+        Insert a record into the public.debezium_signal table.
+        
+        Args:
+            table_info: Table information
+            stream_id: CDC stream ID
+            signal_type: Type of signal - 'execute-snapshot', 'schema-change', 'pause', 'resume'
+            auto_cleanup_after_seconds: If provided, automatically clean up this signal after N seconds
+        
+        Returns:
+            str: The signal ID that was inserted (for manual cleanup later)
+        """
         table_id = self.debezium_signal_id_format.format(schema=table_info.schema, table=table_info.table)
+        
+        # Add timestamp to make IDs unique for repeated operations
+        import time
+        timestamp = str(int(time.time()))
+        if signal_type == "execute-snapshot":
+            table_id = f"snap_{table_info.schema}_{table_info.table}_{timestamp}"
+        
         query = """
         INSERT INTO public.debezium_signal (id, type, data)
         VALUES (
           %s,
-          'execute-snapshot',
+          %s,
           %s
         );
         """
-        data = json.dumps({"data-collections": [f"{table_info.schema}.{table_info.table}"], "type": "incremental"})
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", table_name=table_info.table, data=data, stream_id=stream_id, table=table_info.to_dict())
+        
+        if signal_type == "execute-snapshot":
+            data = json.dumps({
+                "data-collections": [f"{table_info.schema}.{table_info.table}"], 
+                "type": "incremental"
+            })
+        elif signal_type == "schema-change":
+            data = json.dumps({
+                "database": table_info.database
+            })
+        else:
+            data = json.dumps({})
+        
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Inserting record into debezium_signal table", 
+                             signal_id=table_id, table_name=table_info.table, data=data, 
+                             stream_id=stream_id, table=table_info.to_dict())
         try:
-            self.run_query(query, table_info.database, [table_id, data])
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Record inserted successfully", table_name=table_info.table, table=table_info.to_dict())
+            self.run_query(query, table_info.database, [table_id, signal_type, data])
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Signal record inserted successfully", 
+                                 signal_id=table_id, table_name=table_info.table, table=table_info.to_dict())
+            
+            # Optional auto-cleanup (useful for temporary signals)
+            if auto_cleanup_after_seconds:
+                import threading
+                def cleanup_signal():
+                    time.sleep(auto_cleanup_after_seconds)
+                    self.remove_debezium_signal_by_id(table_info.database, table_id)
+                
+                cleanup_thread = threading.Thread(target=cleanup_signal, daemon=True)
+                cleanup_thread.start()
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Auto-cleanup scheduled", 
+                                     signal_id=table_id, cleanup_after_seconds=auto_cleanup_after_seconds)
+            
+            return table_id
+            
         except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", table_name=table_info.table, error=str(e), table=table_info.to_dict())
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to insert record into debezium_signal table", 
+                                 table_name=table_info.table, error=str(e), table=table_info.to_dict())
             raise RuntimeError(f"Failed to insert record into debezium_signal table: {e}")
 
     def table_exists(self, database: str, table_name: str, schema: str) -> bool:
@@ -266,6 +315,45 @@ class YugabyteDBManager:
         self.run_query(query, database)
         self.logger.logMessage(Logging.LogLevel.INFO, "debezium_signal table created or already exists")
 
+    def cleanup_old_debezium_signals(self, database: str, older_than_hours: int = 24):
+        """
+        Clean up old debezium signal entries to prevent table bloat.
+        Keeps the table lean by removing processed signals older than specified hours.
+        """
+        query = """
+        DELETE FROM public.debezium_signal 
+        WHERE created_at < now() - interval '%s hours'
+        """
+        try:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Cleaning up old debezium signals", 
+                                 older_than_hours=older_than_hours, database=database)
+            self.run_query(query, database, [older_than_hours])
+            self.logger.logMessage(Logging.LogLevel.INFO, "Old debezium signals cleaned up successfully", 
+                                 older_than_hours=older_than_hours, database=database)
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to cleanup old debezium signals", 
+                                 error=str(e), database=database)
+
+    def get_active_debezium_signals(self, database: str) -> list:
+        """
+        Get all active debezium signals to understand what operations are pending/in-progress.
+        """
+        query = """
+        SELECT id, type, data, created_at 
+        FROM public.debezium_signal 
+        ORDER BY created_at DESC
+        """
+        try:
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Fetching active debezium signals", database=database)
+            result = self.run_query(query, database)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Active debezium signals retrieved", 
+                                 count=len(result), database=database)
+            return result
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to fetch active debezium signals", 
+                                 error=str(e), database=database)
+            return []
+
     def entry_exists_in_debezium_signal(self, table_info: TableInfo) -> bool:
         """Check if an entry exists in the debezium_signal table for the given TableInfo."""
         table_id = self.debezium_signal_id_format.format(schema=table_info.schema, table=table_info.table)
@@ -307,6 +395,19 @@ class YugabyteDBManager:
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
             raise
+        
+    def get_row_count(self, table_info: TableInfo) -> int:
+        """Get the row count of a specified table."""
+        query = f"SELECT COUNT(*) FROM {table_info.schema}.{table_info.table};"
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Getting row count for YugabyteDB table", database=table_info.database, table=table_info.to_dict())
+        try:
+            result = self.run_query(query, table_info.database)
+            row_count = result[0][0] if result else 0
+            self.logger.logMessage(Logging.LogLevel.INFO, "Row count retrieved successfully", database=table_info.database, table=table_info.to_dict(), row_count=row_count)
+            return row_count
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to get row count for YugabyteDB table", database=table_info.database, table=table_info.to_dict(), error=str(e))
+            raise RuntimeError(f"Failed to get row count for YugabyteDB table: {e}")
         
     def clear_yugabyte_table(self, database: str, table_info: TableInfo):
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.to_dict())

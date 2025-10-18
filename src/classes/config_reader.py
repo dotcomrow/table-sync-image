@@ -14,7 +14,14 @@ class ConfigKeys(Enum):
     LOGGING = "logging"
     HEALTH_CHECK = "health_check"
     PROCESSING = "processing"
-    
+    REDIS = "redis" 
+
+class RedisKeys(Enum):
+    URL = "url"
+    CACHE_KEY = "cacheKey"
+    DEFAULT_TTL = "default_ttl"
+    CACHE_KEYS = "cache_keys"
+
 class YugabyteDBKeys(Enum):
     MASTER_ADDRESSES = "master_addresses"
     YB_ADMIN_PATH = "yb_admin_path"
@@ -46,7 +53,12 @@ class HealthCheckKeys(Enum):
     
 class ProcessingKeys(Enum):
     MAX_SCAN_THREADS = "max_scan_threads"
+    MAX_PREPARATION_THREADS = "max_preparation_threads"
+    MAX_CACHE_CHECK_THREADS = "max_cache_check_threads"
     SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
+    
+class RedisCacheKeys(Enum):
+    ROW_COUNTS = "row_counts"
 
 class ConfigReader:
     def __init__(self, config_path):
@@ -122,6 +134,10 @@ class ConfigReader:
         # Validate processing
         processing = config.get(ConfigKeys.PROCESSING.value, {})
         validate_section(ConfigKeys.PROCESSING.value, processing, ProcessingKeys)
+        
+        # Validate redis
+        redis = config.get(ConfigKeys.REDIS.value, {})
+        validate_section(ConfigKeys.REDIS.value, redis, RedisKeys)
 
         if errors:
             raise ValueError(f"Configuration validation errors: {', '.join(errors)}")

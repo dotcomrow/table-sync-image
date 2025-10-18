@@ -36,8 +36,9 @@ from classes.table_info import TableInfo
 from classes.logging import Logging
 from services.kafka_connector import KafkaConnector
 from services.bigquery_manager import BigQueryManager
-from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, HealthCheckKeys
+from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, HealthCheckKeys, RedisCacheKeys
 from services.yugabyte_db_manager import YugabyteDBManager
+from services.redis import RedisService
 
 # ----------------------------- Orchestrator -----------------------------
 
@@ -48,6 +49,7 @@ class TableSyncOrchestrator:
         self.logger = Logging(self.config)
         self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
+        self.redis_cache = RedisService(self.config, self.logger)
         databases = yugabyte_manager._discover_databases("kafka")
         for db in databases:
             yugabyte_manager.create_debezium_signal_table(db)
@@ -76,31 +78,38 @@ class TableSyncOrchestrator:
         threading.Thread(target=run_server, daemon=True).start()
         print(f"Health server started, port {port}")
         
-    # ------------------------------ Helper functions ------------------------------
+    # ------------------------------ Cache Check Thread ------------------------------
     
-    def getTableInfoForTable(self, table: str, tables: List[TableInfo]) -> Optional[TableInfo]:
-        for t in tables:
-            if t.table == table:
-                return t
-        return None
-    
-    def remove_sync_setup(self, table_info: TableInfo, logger: Logging, config: ConfigReader):
+    def check_cache_counts(self, db: str, logger: Logging, config: ConfigReader):
+        self.logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db)
         yugabyte_manager = YugabyteDBManager(config, logger)
-        kafka_connector = KafkaConnector(config, logger)
-        bigquery_manager = BigQueryManager(config, logger)
-        
+        tables: list[TableInfo] = yugabyte_manager._discover_tables(db)
         try:
-            if yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                logger.logMessage(Logging.LogLevel.DEBUG, "Tearing down connectors and removing from signal table", table=table_info.to_dict())
-                yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
-            if kafka_connector.check_connector_exists(table_info)['source_exists'] or kafka_connector.check_connector_exists(table_info)['sink_exists']:
-                kafka_connector.reset_connectors(table_info)
-                logger.logMessage(Logging.LogLevel.DEBUG, "Connectors reset successfully", table=table_info.to_dict())
-            if table_info.bq_dataset and table_info.bq_table and bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
-                bigquery_manager.delete_table(table_info)
-                logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table deleted successfully", table=table_info.to_dict())
+            for table_info in tables:
+                redis_val = self.redis_cache.get(
+                    self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
+                    self.redis_cache.table_count_key_format.format(
+                        db=table_info.database, 
+                        table_info=table_info)
+                )
+                if redis_val is not None:
+                    logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val)
+                    if self.bigquery_manager.get_row_count(table_info) == redis_val:
+                        logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val)
+                        self.redis_cache.delete(
+                            self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
+                            self.redis_cache.table_count_key_format.format(
+                                db=table_info.database, 
+                                table_info=table_info)
+                        )
+                        yugabyte_manager.remove_entry_from_debezium_signal(db, table_info.table)
+                        
+                # Logic to check cached counts and compare with BigQuery
+                logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info)
         except Exception as e:
-            logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.to_dict(), error=str(e))
+            logger.logMessage(Logging.LogLevel.ERROR, "Error checking cache counts", database=db, error=str(e))
+        
+    # ------------------------------ Prepare Database Thread ------------------------------
             
     def prepare_database(self, db: str, logger: Logging, config: ConfigReader):
         self.logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db)
@@ -114,11 +123,11 @@ class TableSyncOrchestrator:
             
             stream_id = self.yb_admin_utils.create_stream(db)
             yugabyte_manager.insert_into_stream_table(stream_id, db)
-            logger.logMessage(Logging.LogLevel.DEBUG, "Debezium signal table ensured", database=db)
+            logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation complete", database=db)
         except Exception as e:
             logger.logMessage(Logging.LogLevel.ERROR, "Error preparing database", database=db, error=str(e))
 
-    # ----------------------------- Orchestrator Loop -----------------------------
+    # ----------------------------- Orchestrator Loop Thread-----------------------------
     
     def _table_sync_loop(self, db):
         logger = Logging(self.config)
@@ -138,80 +147,39 @@ class TableSyncOrchestrator:
                 logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info.to_dict())
                 # for each table in the database check if it has annotation enabled
                 if table_info.annotation is not None and table_info.annotation.enabled:
-                    # Check to see if table has entry in debezium signal table
-                    if not yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                        # Table does not have entry in debezium signal table
-                        # Means this is a newly annotated table so we check to see if connectors exist as they may be in a bad state
-                        
-                        # but first lets check to see if there is already a table in bigquery.
-                        # this would mean that the table has been annotated and synced before
-                        # so this could be a new build of the platform.
-                        # what we need to do in this case is to pull the data from bigquery into the yugabyte table
-                        # and then setup the connectors to catch new changes
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking BigQuery", table=table_info.to_dict())
-                        bigquery_exists = bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table)
-                        if bigquery_exists:
-                            logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table already exists, need to backfill data into YugabyteDB", table=table_info.to_dict(), bq_table=table_info.bq_table)
-                            # Here you would implement the logic to backfill data from BigQuery to YugabyteDB
-                            # This is a placeholder for the actual backfill logic
-                            try:
-                                bigquery_data = bigquery_manager.fetch_bigquery_data(table_info)
-                                logger.logMessage(Logging.LogLevel.DEBUG, "Fetched data from BigQuery", table=table_info.to_dict(), row_count=len(bigquery_data))
-                                yugabyte_manager.clear_yugabyte_table(db, table_info)
-                                logger.logMessage(Logging.LogLevel.DEBUG, "Cleared YugabyteDB table before backfill", database=db, table=table_info.to_dict())
-                                yugabyte_manager.insert_into_yugabyte(bigquery_data, db, table_info)
-                                logger.logMessage(Logging.LogLevel.DEBUG, "Backfill from BigQuery to YugabyteDB completed", table=table_info.to_dict())
-                            except Exception as e:
-                                logger.logMessage(Logging.LogLevel.ERROR, "Error during backfill from BigQuery", table=table_info.to_dict(), error=str(e))
-                                continue
-                        else:
-                            logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table does not exist, proceeding to set up connectors", table=table_info.to_dict())
-                        
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Table does not have entry in debezium signal table, checking connectors", table=table_info.to_dict())
-                        connector_statuses = kafka_connector.check_connector_exists(table_info)
-                        if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
-                            try:
-                                kafka_connector.setup_connectors(table_info)
-                            except Exception as e:
-                                logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info.to_dict(), error=str(e))
-                                continue
-                        else:
-                            logger.logMessage(Logging.LogLevel.DEBUG, "Connectors already exist for table, resetting and rebuilding", table=table_info.to_dict())
-                            try:
-                                kafka_connector.reset_connectors(table_info)
-                                kafka_connector.setup_connectors(table_info)
-                            except Exception as e:
-                                logger.logMessage(Logging.LogLevel.ERROR, "Error resetting connectors", table=table_info.to_dict(), error=str(e))
-                                continue
-                    else:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Table already has entry in debezium signal table, check if connectors are running", table=table_info.to_dict())
-                        connector_statuses = kafka_connector.check_connector_exists(table_info)
-                        if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
-                            logger.logMessage(Logging.LogLevel.DEBUG, "One or more connectors do not exist, setting up connectors", table=table_info.to_dict())
-                            try:
-                                kafka_connector.reset_connectors(table_info)
-                                kafka_connector.setup_connectors(table_info)
-                            except Exception as e:
-                                logger.logMessage(Logging.LogLevel.ERROR, "Error setting up connectors", table=table_info.to_dict(), error=str(e))
-                                continue
+                    # Table is annotated and enabled, check to see if connectors exist
+                    connector_statuses = kafka_connector.check_connector_exists(table_info)
+                    if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
+                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled, setting up sync", table=table_info.to_dict())
+                        # Create BigQuery dataset if not exists
+                        bigquery_manager.create_dataset(table_info)
+                        # get yugabyte table record count to verify snapshot success
+                        if yugabyte_manager.get_row_count(table_info) > 0:
+                            logger.logMessage(Logging.LogLevel.DEBUG, "Yugabyte table has data, caching record count to verify later with bigquery count", table=table_info.to_dict())
+                            self.redis_cache.set(self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
+                                self.redis_cache.table_count_key_format.format(
+                                    db=table_info.database, 
+                                    table_info=table_info), 
+                                yugabyte_manager.get_row_count(table_info), 
+                                ex=self.config.get(ConfigKeys.REDIS.value, {}).get('default_ttl', 300)
+                            )
+                        # Create source connector
+                        kafka_connector.create_source_connector(table_info)
+                        # Create sink connector
+                        kafka_connector.create_sink_connector(table_info)
+                    elif connector_statuses['source_exists'] and not connector_statuses['sink_exists']:
+                        logger.logMessage(Logging.LogLevel.INFO, "Source connector exists but sink connector missing, creating sink connector", table=table_info.to_dict())
+                        kafka_connector.create_sink_connector(table_info)
+                    elif not connector_statuses['source_exists'] and connector_statuses['sink_exists']:
+                        logger.logMessage(Logging.LogLevel.INFO, "Sink connector exists but source connector missing, creating source connector", table=table_info.to_dict())
+                        kafka_connector.create_source_connector(table_info)
+                        logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled and connectors exist, no action needed", table=table_info.to_dict())
                 else:
-                    if (table_info.annotation is not None and not table_info.annotation.enabled):
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled, removing from signal table and tearing down connectors", table=table_info.to_dict())
-                        self.remove_sync_setup(table_info, logger, self.config)
-                    if table_info.annotation is None:
-                        logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation not found, removing anything that might have been previously setup", table=table_info.to_dict())
-                        self.remove_sync_setup(table_info, logger, self.config)
+                    logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, removing any existing setup if present", table=table_info.to_dict())
+                    
             except Exception as e:
                 logger.logMessage(Logging.LogLevel.ERROR, "Error processing table", table=table_info.to_dict(), error=str(e))
                 continue
-                        
-        # For tables in the database check entries in the signal table for tables in database
-        # Fetch all signal table entries for database and verify that annotation is still enabled for each
-        for table in yugabyte_manager.fetch_tables_in_debezium_signal(db):
-            table_info = self.getTableInfoForTable(table, tables)
-            if table_info is not None and (table_info.annotation is None or not table_info.annotation.enabled):
-                logger.logMessage(Logging.LogLevel.DEBUG, "Table annotation disabled or table not found, removing from signal table and tearing down connectors", table=table_info.to_dict())
-                self.remove_sync_setup(table_info, logger, self.config)
 
     # ----------------------------- Main Loop -----------------------------
 
@@ -220,8 +188,19 @@ class TableSyncOrchestrator:
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         databases = yugabyte_manager._discover_databases()
         print(f"Discovered databases: {databases}")
-        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
             futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+            
+            for future in as_completed(futures):
+                ti = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    error=str(e)
+                    self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", response=ti, error=error)
+                    
+        with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
+            futures = {executor.submit(self.check_cache_counts, db, self.logger, self.config): db for db in databases}
             
             for future in as_completed(futures):
                 ti = futures[future]

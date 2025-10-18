@@ -1,10 +1,13 @@
 import requests
+import re
+import subprocess
+import os
 import json
 import time
-from services.bigquery_manager import BigQueryManager
+from classes.bigquery_manager import BigQueryManager
 from classes.config_reader import ConfigKeys,KafkaConnectKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
-from services.yugabyte_db_manager import YugabyteDBManager
+from classes.yugabyte_db_manager import YugabyteDBManager
 from classes.logging import Logging
 
 class KafkaConnector:
@@ -160,14 +163,10 @@ class KafkaConnector:
 
     def create_source_connector(self, table_info: TableInfo):
         self.logger.logMessage(Logging.LogLevel.INFO, "Creating source connector for table", table=table_info.to_dict())
-        stream_id = self.yugabyte_manager.stream_exists(table_info.database)
+        stream_id = self.yugabyte_manager.stream_exists(table_info)
         if not stream_id:
             raise ValueError("CDC stream does not exist for the database", table=table_info.to_dict())
         try:
-            if self.yugabyte_manager.get_row_count(table_info) > 0:
-                self.logger.logMessage(Logging.LogLevel.DEBUG, "Table has existing data, setting snapshot mode to 'initial'", table=table_info.to_dict())
-                self.yugabyte_manager.insert_debezium_signal(table_info, stream_id, "execute-snapshot", None)
-                
             # Build topic + server name consistently, so sink can subscribe correctly
             topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
 
@@ -219,11 +218,14 @@ class KafkaConnector:
             )
             response = self._send_connector_request(source_connector_name, source_config)
             self.logger.logMessage(Logging.LogLevel.INFO, "Source connector created", response=response, table=table_info.to_dict())
+            # Insert debezium signal record
+            if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+                
+            self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create source connector", error=str(e), table=table_info.to_dict())
             self.reset_connectors(table_info)
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing entry from debezium signal due to failure", table=table_info.to_dict())
-            self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
             raise
 
 
@@ -263,8 +265,9 @@ class KafkaConnector:
 
                 # Table creation / schema behavior
                 "autoCreateTables": "true",
-                "autoUpdateSchemas": "false",
-                "allowNewBigQueryFields": "false",
+                "autoUpdateSchemas": "true",  # Changed to true to handle schema evolution
+                "allowNewBigQueryFields": "true",  # Changed to true to allow new fields
+                "allowBigQueryRequiredFieldRelaxation": "true",  # Allow required field changes
                 "sanitizeTopics": "false",
                 "sanitizeFieldNames": "false",
 
@@ -273,22 +276,37 @@ class KafkaConnector:
                 "deleteEnabled": "true",
                 # BigQuery sink needs the name of the Kafka KEY field to match on:
                 "kafkaKeyFieldName": "id",
-                # Note: primaryKeyMode is not used by this sink; matching is via the Kafka key
-
+                
+                # Error handling - critical for preventing connector deletion
+                "errors.tolerance": "all",  # Continue on errors instead of failing
+                "errors.log.enable": "true",  # Log errors for debugging
+                "errors.log.include.messages": "true",  # Include error messages in logs
+                
+                # Batch settings to reduce BigQuery API calls
+                "batchSize": "100",
+                "maxWriteSize": "10000",
+                
                 # >>> IMPORTANT: Avro + Schema Registry to enable autoCreateTables <<<
                 "key.converter": "io.confluent.connect.avro.AvroConverter",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "key.converter.schema.registry.url": self.schema_registry_url,
                 "value.converter.schema.registry.url": self.schema_registry_url,
+                "key.converter.auto.register.schemas": "true",
+                "value.converter.auto.register.schemas": "true",
 
                 # Consumer start position for new sink
                 "consumer.override.auto.offset.reset": "earliest",
-
-                # Retries / merges
+                
+                # Connection and timeout settings
+                "bigQueryRetry": "10",  # Increased retry count
+                "bigQueryRetryWait": "5000",  # Increased retry wait
+                "connectTimeout": "60000",  # 60 second connection timeout
+                "readTimeout": "120000",  # 2 minute read timeout
+                
+                # Merge settings
                 "enableRetries": "true",
-                "bigQueryRetry": "6",
-                "bigQueryRetryWait": "2000",
-                "mergeIntervalMs": "60000",
+                "mergeIntervalMs": "300000",  # Increased to 5 minutes
+                "mergeRecordsThreshold": "1000",  # Merge when 1000 records accumulated
             }
 
             self.bigquery_manager.create_dataset(table_info)
@@ -302,6 +320,78 @@ class KafkaConnector:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create sink connector", error=str(e), table=table_info.to_dict())
             self.reset_connectors(table_info)
             raise
+
+    def monitor_connector_health_detailed(self, table_info: TableInfo):
+        """Detailed monitoring specifically for connectors that work initially but fail later."""
+        sink_connector_name = self.sink_connector_name_format.format(
+            database=table_info.database,
+            table_name=table_info.table
+        )
+        
+        kc = self.config.get(ConfigKeys.KAFKA_CONNECT.value, {}).get(KafkaConnectKeys.URL.value)
+        if not kc:
+            return
+            
+        try:
+            # Get detailed status
+            status_response = requests.get(f"{kc}/connectors/{sink_connector_name}/status", timeout=10)
+            if status_response.status_code == 200:
+                status = status_response.json()
+                
+                # Log current state
+                connector_state = status.get('connector', {}).get('state', 'UNKNOWN')
+                self.logger.logMessage(Logging.LogLevel.INFO, "Sink connector current state", 
+                                     connector_name=sink_connector_name,
+                                     state=connector_state,
+                                     full_status=status,
+                                     table=table_info.to_dict())
+                
+                # Check for specific BigQuery-related errors in tasks
+                for task in status.get('tasks', []):
+                    task_state = task.get('state', 'UNKNOWN')
+                    trace = task.get('trace', '')
+                    
+                    if task_state == 'FAILED':
+                        # Look for specific BigQuery error patterns
+                        if 'BigQuery' in trace:
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "BigQuery-specific task failure", 
+                                                 connector_name=sink_connector_name,
+                                                 task_id=task.get('id'),
+                                                 trace=trace,
+                                                 table=table_info.to_dict())
+                        elif 'schema' in trace.lower() or 'avro' in trace.lower():
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Schema-related task failure", 
+                                                 connector_name=sink_connector_name,
+                                                 task_id=task.get('id'),
+                                                 trace=trace,
+                                                 table=table_info.to_dict())
+                        elif 'quota' in trace.lower() or 'rate' in trace.lower():
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Quota/Rate limiting task failure", 
+                                                 connector_name=sink_connector_name,
+                                                 task_id=task.get('id'),
+                                                 trace=trace,
+                                                 table=table_info.to_dict())
+                        else:
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "General task failure", 
+                                                 connector_name=sink_connector_name,
+                                                 task_id=task.get('id'),
+                                                 trace=trace,
+                                                 table=table_info.to_dict())
+            
+            # Also check connector metrics if available
+            metrics_response = requests.get(f"{kc}/connectors/{sink_connector_name}/tasks/0/status", timeout=10)
+            if metrics_response.status_code == 200:
+                task_status = metrics_response.json()
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Sink connector task details", 
+                                     connector_name=sink_connector_name,
+                                     task_status=task_status,
+                                     table=table_info.to_dict())
+                                     
+        except Exception as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in detailed connector monitoring", 
+                                 connector_name=sink_connector_name,
+                                 error=str(e), 
+                                 table=table_info.to_dict())
 
     def _send_connector_request(self, name: str, config: dict):
         url = f"{self.kc_url}/connectors/{name}/config"

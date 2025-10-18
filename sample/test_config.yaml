@@ -8,6 +8,13 @@ yugabytedb:
   master_addresses: "yugabytedb:7100"  # Corrected master address
   excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
 
+redis:
+  url: redis://redis:6379/0  # Added Redis configuration
+  cacheKey: "table-sync-cache"  # Example cache key
+  default_ttl: 300  # Default TTL for cache entries in seconds
+  cache_keys:
+    row_counts: "row_counts"
+
 bigquery:
   mock: false
   credentials_path: /vault/secrets/gcp-key.json
@@ -27,4 +34,6 @@ health_check:
 
 processing:
   max_scan_threads: 4
+  max_preparation_threads: 2
+  max_cache_check_threads: 6
   scan_interval_seconds: 30
