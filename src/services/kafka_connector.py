@@ -160,7 +160,7 @@ class KafkaConnector:
 
     def create_source_connector(self, table_info: TableInfo):
         self.logger.logMessage(Logging.LogLevel.INFO, "Creating source connector for table", table=table_info.to_dict())
-        stream_id = self.yugabyte_manager.stream_exists(table_info)
+        stream_id = self.yugabyte_manager.stream_exists(table_info.database)
         if not stream_id:
             raise ValueError("CDC stream does not exist for the database", table=table_info.to_dict())
         try:
