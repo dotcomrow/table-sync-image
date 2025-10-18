@@ -164,6 +164,11 @@ class KafkaConnector:
         if not stream_id:
             raise ValueError("CDC stream does not exist for the database", table=table_info.to_dict())
         try:
+            # Insert debezium signal record
+            if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
+                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
+                
+            self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
             # Build topic + server name consistently, so sink can subscribe correctly
             topic, _, _, server_name = self._derive_topic_and_mappings(table_info)
 
@@ -215,14 +220,11 @@ class KafkaConnector:
             )
             response = self._send_connector_request(source_connector_name, source_config)
             self.logger.logMessage(Logging.LogLevel.INFO, "Source connector created", response=response, table=table_info.to_dict())
-            # Insert debezium signal record
-            if self.yugabyte_manager.entry_exists_in_debezium_signal(table_info):
-                self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
-                
-            self.yugabyte_manager.insert_debezium_signal(table_info, stream_id)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create source connector", error=str(e), table=table_info.to_dict())
             self.reset_connectors(table_info)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing entry from debezium signal due to failure", table=table_info.to_dict())
+            self.yugabyte_manager.remove_entry_from_debezium_signal(table_info.database, table_info.table)
             raise
 
 
