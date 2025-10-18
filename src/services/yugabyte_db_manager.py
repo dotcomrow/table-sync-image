@@ -302,8 +302,8 @@ class YugabyteDBManager:
         table_identifier = f"{database}.{table}"
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Removing entry from debezium_signal table", database=database, table=table)
         try:
-            self.run_query(query, database, [table_identifier])
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry removed successfully from debezium_signal table", database=database, table=table)
+            result = self.run_query(query, database, [table_identifier])
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Entry removed successfully from debezium_signal table", result=result, database=database, table=table)
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to remove entry from debezium_signal table", database=database, table=table, error=str(e))
             raise
