@@ -320,6 +320,10 @@ class YugabyteDBManager:
             self.logger.logMessage(Logging.LogLevel.INFO, "YugabyteDB table cleared", database=database, table=table_info.to_dict())
 
     def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
+        if data is None or len(data) == 0:
+            self.logger.logMessage(Logging.LogLevel.WARNING, "No data to insert into YugabyteDB", database=database, table=table_info.to_dict())
+            return
+        
         self.logger.logMessage(Logging.LogLevel.INFO, "Inserting data into YugabyteDB", database=database, row_count=len(data), table=table_info.to_dict())
         try:
             with self.connect(database) as conn, conn.cursor() as cursor:
