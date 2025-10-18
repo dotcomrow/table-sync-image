@@ -3,8 +3,8 @@ FROM confluentinc/cp-kafka-connect:latest
 # Switch to root user
 USER root
 
-# Install unzip utility
-RUN yum update -y && yum install -y unzip && yum clean all
+# Install unzip utility using microdnf (RHEL 9 minimal package manager)
+RUN microdnf update -y && microdnf install -y unzip && microdnf clean all
 
 # Remove the manual download and use confluent-hub to install the BigQuery Sink Connector
 RUN mkdir -p /plugins && \

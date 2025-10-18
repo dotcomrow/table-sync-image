@@ -38,11 +38,6 @@ class YBAdminUtils:
 
     def create_stream(self, database_name: str) -> str:
         """Create a CDC stream for a given database using yb-admin."""
-        exists = self.stream_exists(database_name)
-        if exists is not None:
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "CDC stream already exists for database", database_name=database_name)
-            return exists
-        
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Creating CDC stream", database_name=database_name)
 
         master_addrs = (

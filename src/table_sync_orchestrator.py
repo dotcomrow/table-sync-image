@@ -103,6 +103,7 @@ class TableSyncOrchestrator:
             logger.logMessage(Logging.LogLevel.ERROR, "Error tearing down connectors", table=table_info.to_dict(), error=str(e))
             
     def prepare_database(self, db: str, logger: Logging, config: ConfigReader):
+        self.logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db)
         yugabyte_manager = YugabyteDBManager(config, logger)
         try:
             yugabyte_manager.create_debezium_signal_table(db)
