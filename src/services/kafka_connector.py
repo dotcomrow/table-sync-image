@@ -266,7 +266,7 @@ class KafkaConnector:
 
                 # Table creation / schema behavior
                 "autoCreateTables": "true",
-                "autoUpdateSchemas": "false",
+                "autoUpdateSchemas": "true",
                 "allowNewBigQueryFields": "false",
                 "sanitizeTopics": "false",
                 "sanitizeFieldNames": "false",
