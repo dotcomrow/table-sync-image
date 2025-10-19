@@ -248,50 +248,49 @@ class KafkaConnector:
                 "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
                 "tasks.max": "1",
 
-                # Topics & explicit mappings
-                "topics": topic,
-                "topic2TableMap": f"{topic}:{table_name}",
+                # ---- Topic & table mapping (choose ONE mapping strategy) ----
+                # Use defaultDataset for the dataset, and map the topic to the table name:
+                "topics": topic,                           # e.g. "yb_mcp_mcp_openapi_ro_mcp_openapi_param_hints.mcp_openapi_ro.mcp_openapi_param_hints"
+                "topic2TableMap": f"{topic}:{table_name}", # e.g. "<topic>:mcp_openapi_param_hints"
+                "defaultDataset": dataset,                 # e.g. "mcp"
+                # (INTENTIONALLY omit "datasets" to avoid conflicts)
+
+                # ---- Auth ----
                 "project": bq_project,
-                # Optional fallback for topics without explicit dataset mapping
-                "defaultDataset": dataset,
-                # Per-topic dataset (from your COMMENT "bq": "dataset.table")
-                "datasets": f"{topic}:{dataset}",
-
-                "allowNewBigQueryFields": "true",
-                "allowBigQueryRequiredFieldRelaxation": "true",
-
-                # Auth
                 "keySource": "FILE",
                 "keyfile": keyfile_path,
 
-                # Table creation / schema behavior
-                "autoCreateTables": "true",
-                "autoUpdateSchemas": "true",
-                "allowNewBigQueryFields": "false",
-                "sanitizeTopics": "false",
-                "sanitizeFieldNames": "false",
-
-                # Upsert/Delete (Debezium-friendly)
-                "upsertEnabled": "true",
-                "deleteEnabled": "true",
-                # BigQuery sink needs the name of the Kafka KEY field to match on:
-                "kafkaKeyFieldName": "id",
-                # Note: primaryKeyMode is not used by this sink; matching is via the Kafka key
-
-                # >>> IMPORTANT: Avro + Schema Registry to enable autoCreateTables <<<
+                # ---- Converters (Avro + Schema Registry) ----
                 "key.converter": "io.confluent.connect.avro.AvroConverter",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "key.converter.schema.registry.url": self.schema_registry_url,
                 "value.converter.schema.registry.url": self.schema_registry_url,
 
-                # Consumer start position for new sink
+                # ---- Table creation / schema evolution ----
+                "autoCreateTables": "true",
+                "autoUpdateSchemas": "true",
+                "allowNewBigQueryFields": "true",
+                "allowBigQueryRequiredFieldRelaxation": "true",
+                "allowSchemaUnionization": "true",   # important with Debezium-style evolving schemas
+                "allBQFieldsNullable": "true",       # optional but avoids REQUIRED field surprises
+
+                # ---- Upsert/Delete (Debezium-friendly) ----
+                "upsertEnabled": "true",
+                "deleteEnabled": "true",
+                "kafkaKeyFieldName": "id",
+
+                # ---- Misc behavior ----
+                "sanitizeTopics": "false",
+                "sanitizeFieldNames": "false",
+
+                # ---- Consumer start position for a fresh sink ----
                 "consumer.override.auto.offset.reset": "earliest",
 
-                # Retries / merges
+                # ---- Retries / merge cadence ----
                 "enableRetries": "true",
                 "bigQueryRetry": "6",
                 "bigQueryRetryWait": "2000",
-                "mergeIntervalMs": "60000",
+                "mergeIntervalMs": "60000"
             }
 
             self.bigquery_manager.create_dataset(table_info)
