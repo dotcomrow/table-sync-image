@@ -274,7 +274,7 @@ class TableSyncOrchestrator:
                                     db=table_info.database, 
                                     table_info=table_info), 
                                 yugabyte_manager.get_row_count(table_info), 
-                                ex=self.config.get(ConfigKeys.REDIS.value, {}).get('default_ttl', 300)
+                                self.config.get(ConfigKeys.REDIS.value, {}).get('default_ttl', 300)
                             )
                         # Create source connector
                         kafka_connector.create_source_connector(table_info)
