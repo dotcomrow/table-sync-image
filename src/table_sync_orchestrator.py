@@ -283,7 +283,7 @@ class TableSyncOrchestrator:
                 for table_info in tables:
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if table_info.annotation is None or not table_info.annotation.enabled:
-                        if bigquery_manager.table_exists(table_info):
+                        if bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
                             logger.logMessage(Logging.LogLevel.INFO, "Bigquery table exists, removing...", table=table_info.to_dict(), thread=threading.current_thread().name)
                             bigquery_manager.delete_table(table_info)
 
