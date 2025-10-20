@@ -339,7 +339,7 @@ class TableSyncOrchestrator:
                 # for each table in the database check if it has annotation enabled
                 if table_info.annotation is not None and table_info.annotation.enabled:
                     # Table is annotated and enabled, check to see if bigquery table exists
-                    if bigquery_manager.table_exists(table_info):
+                    if bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
                         logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table exists for annotated table, backfilling data into yugabyte", table=table_info.to_dict(), thread=threading.current_thread().name)
                         data = bigquery_manager.fetch_bigquery_data(table_info)
                         yugabyte_manager.insert_into_yugabyte(table_info, data)
