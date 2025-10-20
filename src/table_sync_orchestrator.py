@@ -194,10 +194,6 @@ class TableSyncOrchestrator:
         prep_thread.start()
         self._background_threads.append(prep_thread)
         
-        # Wait for database preparation to complete
-        prep_thread.join()
-        self.logger.logMessage(Logging.LogLevel.INFO, "Database preparation completed, starting cache checking")
-        
         # Start cache checking thread (runs continuously in background)
         cache_thread = threading.Thread(
             target=self._background_cache_checking,
