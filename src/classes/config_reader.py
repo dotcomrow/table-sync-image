@@ -52,9 +52,25 @@ class HealthCheckKeys(Enum):
     PORT = "port"
     
 class ProcessingKeys(Enum):
+    TABLE_SCANNER = "table_scanner"
+    DATA_PREPARER = "database_prep"
+    CACHE_CHECKER = "cache_check"
+    CONNECTOR_CLEANER = "connector_cleanup"
+    
+class ProcessingTableScannerKeys(Enum):
     MAX_SCAN_THREADS = "max_scan_threads"
+    SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
+
+class ProcessingDatabasePrepKeys(Enum):
     MAX_PREPARATION_THREADS = "max_preparation_threads"
+    SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
+    
+class ProcessingCacheCheckerKeys(Enum):
     MAX_CACHE_CHECK_THREADS = "max_cache_check_threads"
+    SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
+    
+class ProcessingConnectorCleanerKeys(Enum):
+    MAX_CONNECTOR_CLEANUP_THREADS = "max_connector_cleanup_threads"
     SCAN_INTERVAL_SECONDS = "scan_interval_seconds"
     
 class RedisCacheKeys(Enum):

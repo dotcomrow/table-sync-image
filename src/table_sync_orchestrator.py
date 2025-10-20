@@ -36,7 +36,7 @@ from classes.table_info import TableInfo
 from classes.logging import Logging
 from services.kafka_connector import KafkaConnector
 from services.bigquery_manager import BigQueryManager
-from classes.config_reader import ConfigReader, ConfigKeys, ProcessingKeys, HealthCheckKeys, RedisCacheKeys
+from classes.config_reader import ConfigReader, ConfigKeys, ProcessingCacheCheckerKeys, ProcessingConnectorCleanerKeys, ProcessingDatabasePrepKeys, HealthCheckKeys, ProcessingTableScannerKeys, RedisCacheKeys, RedisKeys
 from services.yugabyte_db_manager import YugabyteDBManager
 from services.redis import RedisService
 
@@ -50,7 +50,6 @@ class TableSyncOrchestrator:
         self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
         yugabyte_manager = YugabyteDBManager(self.config, self.logger)
         self.redis_cache = RedisService(self.config, self.logger)
-        self.bigquery_manager = BigQueryManager(self.config, self.logger)
         
         # Background task management
         self._background_threads = []
@@ -90,36 +89,42 @@ class TableSyncOrchestrator:
         """Run database preparation in background thread."""
         self.logger.logMessage(Logging.LogLevel.INFO, "Starting background database preparation", databases=databases)
         
-        try:
-            with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
-                futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+        database_prep_interval = self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingDatabasePrepKeys.SCAN_INTERVAL_SECONDS.value, 60)
+        
+        while not self._background_shutdown.is_set():
+            try:
+                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingDatabasePrepKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
+                    futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+                    
+                    for future in as_completed(futures):
+                        if self._background_shutdown.is_set():
+                            break
+                        db = futures[future]
+                        try:
+                            future.result()
+                            self.logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation completed", database=db)
+                        except Exception as e:
+                            error = str(e)
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", database=db, error=error)
                 
-                for future in as_completed(futures):
-                    if self._background_shutdown.is_set():
-                        break
-                    db = futures[future]
-                    try:
-                        future.result()
-                        self.logger.logMessage(Logging.LogLevel.DEBUG, "Database preparation completed", database=db)
-                    except Exception as e:
-                        error = str(e)
-                        self.logger.logMessage(Logging.LogLevel.ERROR, "Error in database preparation", database=db, error=error)
-            
-            self.logger.logMessage(Logging.LogLevel.INFO, "Background database preparation completed")
-        except Exception as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Critical error in background database preparation", error=str(e))
-    
+                # Wait for next cycle or shutdown signal
+                self._background_shutdown.wait(timeout=database_prep_interval)
+
+                self.logger.logMessage(Logging.LogLevel.INFO, "Background database preparation completed")
+            except Exception as e:
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Critical error in background database preparation", error=str(e))
+        
     def _background_cache_checking(self, databases: List[str]):
         """Run cache checking continuously in background thread."""
         self.logger.logMessage(Logging.LogLevel.INFO, "Starting background cache checking", databases=databases)
-        
-        cache_check_interval = self.config.get(ConfigKeys.PROCESSING.value, {}).get('cache_check_interval_seconds', 60)
-        
+
+        cache_check_interval = self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingCacheCheckerKeys.SCAN_INTERVAL_SECONDS.value, 60)
+
         while not self._background_shutdown.is_set():
             try:
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "Running cache check cycle")
                 
-                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
+                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingCacheCheckerKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
                     futures = {executor.submit(self.check_cache_counts, db, self.logger, self.config): db for db in databases}
                     
                     for future in as_completed(futures):
@@ -141,6 +146,39 @@ class TableSyncOrchestrator:
                 self._background_shutdown.wait(timeout=30)
         
         self.logger.logMessage(Logging.LogLevel.INFO, "Background cache checking stopped")
+        
+    def _background_connector_cleanup(self, databases: List[str]):
+        """Run connector cleanup continuously in background thread."""
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting background connector cleanup", databases=databases)
+
+        connector_cleanup_interval = self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingConnectorCleanerKeys.SCAN_INTERVAL_SECONDS.value, 300)
+
+        while not self._background_shutdown.is_set():
+            try:
+                self.logger.logMessage(Logging.LogLevel.DEBUG, "Running connector cleanup cycle")
+                
+                with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingConnectorCleanerKeys.MAX_CONNECTOR_CLEANUP_THREADS.value, 4)) as executor:
+                    futures = {executor.submit(self.cleanup_connectors, db, self.logger, self.config): db for db in databases}
+                    
+                    for future in as_completed(futures):
+                        if self._background_shutdown.is_set():
+                            break
+                        db = futures[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            error = str(e)
+                            self.logger.logMessage(Logging.LogLevel.ERROR, "Error in connector cleanup", database=db, error=error)
+                
+                # Wait for next cycle or shutdown signal
+                self._background_shutdown.wait(timeout=connector_cleanup_interval)
+                
+            except Exception as e:
+                self.logger.logMessage(Logging.LogLevel.ERROR, "Error in background connector cleanup cycle", error=str(e))
+                # Wait a bit before retrying
+                self._background_shutdown.wait(timeout=30)
+        
+        self.logger.logMessage(Logging.LogLevel.INFO, "Background connector cleanup stopped")
     
     def _start_background_tasks(self, databases: List[str]):
         """Start background tasks for database preparation and cache checking."""
@@ -150,10 +188,11 @@ class TableSyncOrchestrator:
         prep_thread = threading.Thread(
             target=self._background_database_preparation,
             args=(databases,),
-            daemon=False,  # Not daemon - we need to wait for completion
+            daemon=True,
             name="DatabasePreparation"
         )
         prep_thread.start()
+        self._background_threads.append(prep_thread)
         
         # Wait for database preparation to complete
         prep_thread.join()
@@ -168,6 +207,16 @@ class TableSyncOrchestrator:
         )
         cache_thread.start()
         self._background_threads.append(cache_thread)
+        
+        # Start cache checking thread (runs continuously in background)
+        connector_cleanup = threading.Thread(
+            target=self._background_connector_cleanup,
+            args=(databases,),
+            daemon=True,  # Daemon thread - can be killed when main exits
+            name="ConnectorCleanup"
+        )
+        connector_cleanup.start()
+        self._background_threads.append(connector_cleanup)
         
         self.logger.logMessage(Logging.LogLevel.INFO, "Background tasks started")
     
@@ -188,6 +237,7 @@ class TableSyncOrchestrator:
     def check_cache_counts(self, db: str, logger: Logging, config: ConfigReader):
         self.logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
+        bigquery_manager = BigQueryManager(self.config, self.logger)
         tables: list[TableInfo] = yugabyte_manager._discover_tables(db)
         try:
             while True:
@@ -201,7 +251,7 @@ class TableSyncOrchestrator:
                     )
                     if redis_val is not None:
                         logger.logMessage(Logging.LogLevel.DEBUG, "Found cached row count", database=db, table=table_info.to_dict(), cached_count=redis_val, thread=threading.current_thread().name)
-                        if self.bigquery_manager.get_row_count(table_info) == redis_val:
+                        if bigquery_manager.get_row_count(table_info) == redis_val:
                             logger.logMessage(Logging.LogLevel.INFO, "BigQuery table row count matches cached YugabyteDB count", database=db, table=table_info.to_dict(), row_count=redis_val, thread=threading.current_thread().name)
                             self.redis_cache.delete(
                                 self.config.get(ConfigKeys.REDIS.value).get(RedisCacheKeys.ROW_COUNTS.value),
@@ -215,12 +265,48 @@ class TableSyncOrchestrator:
                 logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info.to_dict(), thread=threading.current_thread().name)
                 # Sleep for the configured interval
                 elapsed = time.time() - start
-                sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
+                sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingCacheCheckerKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                     
         except Exception as e:
             logger.logMessage(Logging.LogLevel.ERROR, "Error checking cache counts", database=db, error=str(e))
+            
+    # ------------------------------ Connector Cleanup Thread ------------------------------
+    
+    def cleanup_connectors(self, db: str, logger: Logging, config: ConfigReader):
+        self.logger.logMessage(Logging.LogLevel.INFO, "Starting connector cleanup for database", database=db, thread=threading.current_thread().name)
+        yugabyte_manager = YugabyteDBManager(self.config, logger)
+        bigquery_manager = BigQueryManager(self.config, self.logger)
+        kafka_connector = KafkaConnector(config, logger)
+        try:
+            while True:
+                start = time.time()
+                tables = yugabyte_manager._discover_tables(db)
+                # Logic to identify and clean up stale connectors
+                for table_info in tables:
+                    connector_statuses = kafka_connector.check_connector_exists(table_info)
+                    if table_info.annotation is None or not table_info.annotation.enabled:
+                        if bigquery_manager.table_exists(table_info):
+                            logger.logMessage(Logging.LogLevel.INFO, "Bigquery table exists, removing...", table=table_info.to_dict(), thread=threading.current_thread().name)
+                            bigquery_manager.delete_table(table_info)
+
+                        if connector_statuses['source_exists'] or connector_statuses['sink_exists']:
+                            logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, cleaning up existing connectors", table=table_info.to_dict(), thread=threading.current_thread().name)
+                            if connector_statuses['source_exists']:
+                                kafka_connector.delete_source_connector(table_info)
+                            if connector_statuses['sink_exists']:
+                                kafka_connector.delete_sink_connector(table_info)
+                
+                logger.logMessage(Logging.LogLevel.DEBUG, "Connector cleanup cycle complete", database=db, thread=threading.current_thread().name)
+                # Sleep for the configured interval
+                elapsed = time.time() - start
+                sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingConnectorCleanerKeys.SCAN_INTERVAL_SECONDS.value, 300) - elapsed)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    
+        except Exception as e:
+            logger.logMessage(Logging.LogLevel.ERROR, "Error during connector cleanup", database=db, error=str(e))
         
     # ------------------------------ Prepare Database Thread ------------------------------
             
@@ -256,7 +342,12 @@ class TableSyncOrchestrator:
                 logger.logMessage(Logging.LogLevel.DEBUG, "Processing table", table=table_info.to_dict(), thread=threading.current_thread().name)
                 # for each table in the database check if it has annotation enabled
                 if table_info.annotation is not None and table_info.annotation.enabled:
-                    # Table is annotated and enabled, check to see if connectors exist
+                    # Table is annotated and enabled, check to see if bigquery table exists
+                    if bigquery_manager.table_exists(table_info):
+                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table exists for annotated table, backfilling data into yugabyte", table=table_info.to_dict(), thread=threading.current_thread().name)
+                        data = bigquery_manager.fetch_bigquery_data(table_info)
+                        yugabyte_manager.insert_into_yugabyte(table_info, data)
+                    
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
                         logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled, setting up sync", table=table_info.to_dict(), thread=threading.current_thread().name)
@@ -270,7 +361,7 @@ class TableSyncOrchestrator:
                                     db=table_info.database, 
                                     table_info=table_info), 
                                 yugabyte_manager.get_row_count(table_info), 
-                                self.config.get(ConfigKeys.REDIS.value, {}).get('default_ttl', 300)
+                                self.config.get(ConfigKeys.REDIS.value, {}).get(RedisKeys.DEFAULT_TTL.value, 300)
                             )
                         # Create source connector
                         kafka_connector.create_source_connector(table_info)
@@ -312,7 +403,7 @@ class TableSyncOrchestrator:
                 start = time.time()
                 
                 try:
-                    with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.MAX_SCAN_THREADS.value, 4)) as executor:
+                    with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingTableScannerKeys.MAX_SCAN_THREADS.value, 4)) as executor:
                         futures = {executor.submit(self._table_sync_loop, db): db for db in databases}
 
                         for future in as_completed(futures):
@@ -334,7 +425,7 @@ class TableSyncOrchestrator:
                     self.logger.logMessage(Logging.LogLevel.INFO, "Scan loop complete", elapsed_time=elapsed, elapsed_formatted=f"{minutes}m {seconds:.2f}s")
                     
                     # Sleep for the configured interval
-                    sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
+                    sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingTableScannerKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)
                     if sleep_time > 0:
                         time.sleep(sleep_time)
         
