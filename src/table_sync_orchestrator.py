@@ -286,6 +286,7 @@ class TableSyncOrchestrator:
                 else:
                     logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, removing any existing setup if present", table=table_info.to_dict(), thread=threading.current_thread().name)
                     
+                    
             except Exception as e:
                 logger.logMessage(Logging.LogLevel.ERROR, "Error processing table", table=table_info.to_dict(), error=str(e), thread=threading.current_thread().name)
                 continue
