@@ -409,16 +409,16 @@ class YugabyteDBManager:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to get row count for YugabyteDB table", database=table_info.database, table=table_info.to_dict(), error=str(e))
             raise RuntimeError(f"Failed to get row count for YugabyteDB table: {e}")
         
-    def clear_yugabyte_table(self, database: str, table_info: TableInfo):
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=database, table=table_info.to_dict())
+    def clear_yugabyte_table(self, table_info: TableInfo):
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Clearing YugabyteDB table", database=table_info.database, table=table_info.to_dict())
         try:
-            with self.connect(database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with self.connect(table_info.database) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = f"DELETE FROM {table_info.schema}.{table_info.table} WHERE id IN (SELECT id FROM {table_info.schema}.{table_info.table});"
                 cur.execute(query)
                 conn.commit()
         finally:
             conn.close()
-            self.logger.logMessage(Logging.LogLevel.INFO, "YugabyteDB table cleared", database=database, table=table_info.to_dict())
+            self.logger.logMessage(Logging.LogLevel.INFO, "YugabyteDB table cleared", database=table_info.database, table=table_info.to_dict())
 
     def insert_into_yugabyte(self, data, table_info: TableInfo):
         if data is None or len(data) == 0:
