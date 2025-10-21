@@ -44,7 +44,8 @@ from services.redis import RedisService
 
 class TableSyncOrchestrator:
     def __init__(self, config_path: str, start_servers: bool = True):
-        self.running = False        
+        self.running = False
+        self.config_path = config_path
         self.config = ConfigReader(config_path).load_config()
         self.logger = Logging(self.config)
         self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
