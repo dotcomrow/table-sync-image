@@ -170,13 +170,15 @@ class YBAdminUtils:
         )
         return False
 
-
-    def get_table_id(self, table_info: TableInfo) -> Optional[str]:
+    def get_table_id(self, table_info: TableInfo) -> str:
         """
-        Return the Yugabyte table UUID for ysql.<db>.<schema>.<table> using `yb-admin list_tables`.
-        Robustly parses output across formats by deriving schema/table from the fully-qualified name
-        and extracting a hex table_id token from the line.
+        Expects table_info.database, table_info.schema, table_info.table
+        Returns the Yugabyte table UUID for ysql.<db>.<schema>.<table>.
         """
+        yb_admin_bin = self.config.get(
+            ConfigKeys.YUGABYTEDB.value, {}
+        ).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
+        
         master_addrs = (
             self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
@@ -184,52 +186,44 @@ class YBAdminUtils:
         if not master_addrs:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured")
             raise ValueError("Master addresses not configured")
+        
+        cmd = [
+            yb_admin_bin,
+            "--master_addresses", master_addrs,
+            "list_tables", "include_db_type", "include_table_id",
+        ]
+        out = subprocess.check_output(cmd, text=True)  # text=True -> str instead of bytes
 
-        yb_admin_bin = self.config.get(
-            ConfigKeys.YUGABYTEDB.value, {}
-        ).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
+        expected_prefix = f"ysql.{table_info.database}."
+        expected_name = f"{table_info.table}"
+        expected_schema = f"ysql_schema={table_info.schema}"
 
-        # Ask for DB type and table id; table type may appear as a 3rd token but we don't rely on it.
-        out = subprocess.check_output(
-            [yb_admin_bin, "--master_addresses", master_addrs, "list_tables", "include_db_type", "include_table_id"],
-            text=True,
-            stderr=subprocess.STDOUT,
-        )
-
-        target_db = table_info.database
-        target_schema = table_info.schema
-        target_table = table_info.table
-
-        # Lines typically look like:
-        #   ysql.<db>.<schema>.<table> <table_id> <table_type?>
-        # Some builds can include extra kv-pairs; prefer regex extraction.
-        best_match_id = None
+        matches = []
 
         for line in out.splitlines():
-            line = line.strip()
-            if not line or not line.startswith(f"ysql.{target_db}."):
+            # Each line looks like:
+            # ysql.<db>.<schema>.<table> <table_id> <table_type>
+            parts = line.strip().split()
+            if len(parts) < 4:
                 continue
 
-            # Extract the fully-qualified ysql name (first whitespace-separated token)
-            name_token = line.split()[0]
+            fq_name, table_schema, table_id = parts[0], parts[1][1:-1], parts[2][1:-1]
 
-            # Derive schema.table from the fq name
-            # name_token form: ysql.<db>.<schema>.<table>
-            try:
-                remainder = name_token.split('.', 2)[-1]  # "<schema>.<table>"
-                schema_part, table_part = remainder.split('.', 1)
-            except ValueError:
+            if not fq_name.startswith(expected_prefix):
+                continue
+            
+            if table_schema != expected_schema:
                 continue
 
-            if schema_part != target_schema or table_part != target_table:
-                continue
+            # fq_name is "ysql.<db>.<schema>.<table>" but schema+table is one token with a dot.
+            # Split "ysql.<db>." off and compare the remainder to "<schema>.<table>"
+            remainder = fq_name.split('.', 2)[-1]  # "<schema>.<table>"
+            if remainder == expected_name:
+                matches.append(table_id)
 
-            # Extract a hex-like table id token from the rest of the line
-            m = re.search(r'\b([0-9a-fA-F]{16,})\b', line[len(name_token):])
-            if m:
-                candidate = m.group(1)
-                # Keep the first match; if multiple identical lines show up, it's the same id
-                best_match_id = candidate
-                break
+        if not matches:
+            return None
+        if len(matches) > 1:
+            return None
 
-        return best_match_id
+        return matches[0]
