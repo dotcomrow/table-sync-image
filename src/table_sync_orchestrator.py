@@ -346,14 +346,14 @@ class TableSyncOrchestrator:
                 # for each table in the database check if it has annotation enabled
                 if table_info.annotation is not None and table_info.annotation.enabled:
                     # Table is annotated and enabled, check to see if bigquery table exists
-                    if bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
-                        logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table exists for annotated table, backfilling data into yugabyte", table=table_info.to_dict(), thread=threading.current_thread().name)
-                        data = bigquery_manager.fetch_bigquery_data(table_info)
-                        yugabyte_manager.clear_yugabyte_table(table_info)
-                        yugabyte_manager.insert_into_yugabyte(data, table_info)
-                    
                     connector_statuses = kafka_connector.check_connector_exists(table_info)
                     if not connector_statuses['source_exists'] or not connector_statuses['sink_exists']:
+                        if bigquery_manager.check_table_exists(table_info.bq_dataset, table_info.bq_table):
+                            logger.logMessage(Logging.LogLevel.DEBUG, "BigQuery table exists for annotated table, backfilling data into yugabyte", table=table_info.to_dict(), thread=threading.current_thread().name)
+                            data = bigquery_manager.fetch_bigquery_data(table_info)
+                            yugabyte_manager.clear_yugabyte_table(table_info)
+                            yugabyte_manager.insert_into_yugabyte(data, table_info)
+
                         logger.logMessage(Logging.LogLevel.INFO, "Table annotation enabled, setting up sync", table=table_info.to_dict(), thread=threading.current_thread().name)
                         # Create BigQuery dataset if not exists
                         bigquery_manager.create_dataset(table_info)
