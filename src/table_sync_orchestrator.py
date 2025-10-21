@@ -261,7 +261,7 @@ class TableSyncOrchestrator:
                             yugabyte_manager.remove_entry_from_debezium_signal(db, table_info.table)
                             
                 # Logic to check cached counts and compare with BigQuery
-                logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, table=table_info.to_dict(), thread=threading.current_thread().name)
+                logger.logMessage(Logging.LogLevel.DEBUG, "Cache check complete", database=db, thread=threading.current_thread().name)
                 # Sleep for the configured interval
                 elapsed = time.time() - start
                 sleep_time = max(0, self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingCacheCheckerKeys.SCAN_INTERVAL_SECONDS.value, 30) - elapsed)

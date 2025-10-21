@@ -20,6 +20,7 @@ class YugabyteDBManager:
         self.port = db_cfg.get('port', 5433)
         self.user = db_cfg.get('user', 'yugabyte')
         self.password = db_cfg.get('password', 'yugabyte')
+        self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
         self.logger = logger
 
     def connect(self, database: str):
@@ -169,7 +170,7 @@ class YugabyteDBManager:
                     
                     ann = TableAnnotation.from_comment(row['table_comment']) if row['table_comment'] else None
                     table = TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann)
-                    if YBAdminUtils.verify_table_covered_by_stream(stream_id, table):
+                    if self.yb_admin_utils.verify_table_covered_by_stream(stream_id, table):
                         self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is covered by CDC stream and added to sync candidates", table=table.to_dict())
                         out.append(table)
                     else:
