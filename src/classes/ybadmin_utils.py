@@ -71,7 +71,10 @@ class YBAdminUtils:
         self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
     
-    def _run_yb_admin(yb_admin_bin: str, master_addrs: str, args: list[str], timeout: int = 20) -> str:
+    def _run_yb_admin(self, master_addrs: str, args: list[str], timeout: int = 20) -> str:
+        yb_admin_bin = self.config.get(
+            ConfigKeys.YUGABYTEDB.value, {}
+        ).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
         cmd = [yb_admin_bin, "--master_addresses", master_addrs] + args
         try:
             return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=timeout)
@@ -106,61 +109,51 @@ class YBAdminUtils:
         try:
             # 1) Resolve the table's UUID (works for YSQL)
             table_id = self.get_table_id(yb_admin_bin, table_info)
+            if not table_id:
+                self.logger.logMessage(
+                    Logging.LogLevel.WARNING,
+                    "Could not resolve table ID; cannot verify coverage",
+                    table=table_info.to_dict(),
+                )
+                return False
+            
             self.logger.logMessage(Logging.LogLevel.DEBUG, "Resolved table ID", table_id=table_id, table=table_info.to_dict())
             # 2) Describe the stream
-            out = self._run_yb_admin(yb_admin_bin, master_addrs, ["describe_change_data_stream", stream_id])
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin describe_change_data_stream output", output=out)
+            out = self._run_yb_admin(master_addrs=master_addrs, args=["get_change_data_stream_info", stream_id])
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin get_change_data_stream_info output", output=out)
+            
+            # 3) Parse: collect explicit table_ids (quoted) and namespace_id from get_change_data_stream_info
+            #    Example lines in output:
+            #      table_info { ... table_id: "00004000000030008000000000004001" }
+            #      namespace_id: "00004000000030008000000000000000"
+            table_ids = set(re.findall(r'^\s*table_id:\s*"([0-9a-fA-F]+)"', out, flags=re.MULTILINE))
+            namespace_id = None
 
-            # 3) Parse: collect table_ids (if table-level) and/or namespace info (if db-level)
-            #    Examples seen in output:
-            #      table_id: 000033ee0000abcd00001234...
-            #      db_type: YSQL
-            #      namespace_name: mcp
-            table_ids = set(re.findall(r"\btable_id:\s*([0-9a-fA-F]+)\b", out))
-            db_type = None
-            namespace = None
-
-            m = re.search(r"\bdb_type:\s*(\w+)", out)
+            m = re.search(r'^\s*namespace_id:\s*"([0-9a-fA-F]+)"', out, flags=re.MULTILINE)
             if m:
-                db_type = m.group(1).upper()
-
-            m = re.search(r"\bnamespace_name:\s*([A-Za-z0-9_\-]+)", out)
-            if m:
-                namespace = m.group(1)
+                namespace_id = m.group(1)
 
             # 4) Decide coverage
             if table_ids:
-                # Table-level stream: membership must include our table_id
+                # Stream lists specific tables; membership must include our table_id
                 covered = table_id in table_ids
                 self.logger.logMessage(
                     Logging.LogLevel.DEBUG,
-                    "Table-level stream coverage check",
+                    "Stream explicit table_id coverage check",
                     table_id=table_id,
                     covered=covered,
-                    stream_table_ids=list(table_ids),
+                    stream_table_ids=list(sorted(table_ids)),
                 )
                 return covered
 
-            # No table_ids listed → likely a DB/namespace-level stream
-            if (db_type == "YSQL") and (namespace == table_info.database):
-                self.logger.logMessage(
-                    Logging.LogLevel.DEBUG,
-                    "Namespace-level stream coverage check",
-                    db_type=db_type,
-                    namespace=namespace,
-                    database=table_info.database,
-                    covered=True,
-                )
-                return True
-
-            # Fallback: not covered
+            # No explicit table_ids listed → likely a namespace-level stream.
+            # This output does not include db_type or namespace_name, only namespace_id.
+            # Without resolving namespace_id → DB name, we can't assert coverage here.
             self.logger.logMessage(
                 Logging.LogLevel.DEBUG,
-                "Stream does not cover table",
-                reason="No matching table_ids and namespace/db mismatch",
-                db_type=db_type,
-                namespace=namespace,
-                database=table_info.database,
+                "Namespace-level stream detected (no explicit table_ids)",
+                namespace_id=namespace_id,
+                note="Resolve namespace_id to DB name via `yb-admin list_namespaces` to confirm coverage.",
             )
             return False
 
@@ -196,7 +189,8 @@ class YBAdminUtils:
         out = subprocess.check_output(cmd, text=True)  # text=True -> str instead of bytes
 
         expected_prefix = f"ysql.{table_info.database}."
-        expected_name = f"{table_info.schema}.{table_info.table}"
+        expected_name = f"{table_info.table}"
+        expected_schema = f"ysql_schema={table_info.schema}"
 
         matches = []
 
@@ -207,9 +201,12 @@ class YBAdminUtils:
             if len(parts) < 3:
                 continue
 
-            fq_name, table_id, _table_type = parts[0], parts[1], parts[2]
+            fq_name, table_schema, table_id = parts[0], parts[1][1:-1], parts[2][1:-1]
 
             if not fq_name.startswith(expected_prefix):
+                continue
+            
+            if table_schema != expected_schema:
                 continue
 
             # fq_name is "ysql.<db>.<schema>.<table>" but schema+table is one token with a dot.
@@ -219,8 +216,8 @@ class YBAdminUtils:
                 matches.append(table_id)
 
         if not matches:
-            return -1
+            return None
         if len(matches) > 1:
-            return -1
+            return None
 
         return matches[0]
