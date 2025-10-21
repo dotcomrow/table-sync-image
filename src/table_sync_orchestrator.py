@@ -295,9 +295,9 @@ class TableSyncOrchestrator:
                         if connector_statuses['source_exists'] or connector_statuses['sink_exists']:
                             logger.logMessage(Logging.LogLevel.INFO, "Table annotation disabled or not found, cleaning up existing connectors", table=table_info.to_dict(), thread=threading.current_thread().name)
                             if connector_statuses['source_exists']:
-                                kafka_connector.delete_source_connector(table_info)
+                                kafka_connector.delete_source_cdc_connector(table_info)
                             if connector_statuses['sink_exists']:
-                                kafka_connector.delete_sink_connector(table_info)
+                                kafka_connector.delete_sink_cdc_connector(table_info)
                 
                 logger.logMessage(Logging.LogLevel.DEBUG, "Connector cleanup cycle complete", database=db, thread=threading.current_thread().name)
                 # Sleep for the configured interval
