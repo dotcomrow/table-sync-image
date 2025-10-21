@@ -420,14 +420,14 @@ class YugabyteDBManager:
             conn.close()
             self.logger.logMessage(Logging.LogLevel.INFO, "YugabyteDB table cleared", database=database, table=table_info.to_dict())
 
-    def insert_into_yugabyte(self, data, database: str, table_info: TableInfo):
+    def insert_into_yugabyte(self, data, table_info: TableInfo):
         if data is None or len(data) == 0:
-            self.logger.logMessage(Logging.LogLevel.WARNING, "No data to insert into YugabyteDB", database=database, table=table_info.to_dict())
+            self.logger.logMessage(Logging.LogLevel.WARNING, "No data to insert into YugabyteDB", database=table_info.database, table=table_info.to_dict())
             return
-        
-        self.logger.logMessage(Logging.LogLevel.INFO, "Inserting data into YugabyteDB", database=database, row_count=len(data), table=table_info.to_dict())
+
+        self.logger.logMessage(Logging.LogLevel.INFO, "Inserting data into YugabyteDB", database=table_info.database, row_count=len(data), table=table_info.to_dict())
         try:
-            with self.connect(database) as conn, conn.cursor() as cursor:
+            with self.connect(table_info.database) as conn, conn.cursor() as cursor:
                 # Assuming the table has columns matching the BigQuery table
                 columns = ", ".join(data[0].keys())
                 values_placeholder = ", ".join([f"%({col})s" for col in data[0].keys()])
@@ -463,6 +463,6 @@ class YugabyteDBManager:
                 execute_batch(cursor, query, data)
                 
                 conn.commit()
-                self.logger.logMessage(Logging.LogLevel.INFO, "Data inserted successfully", database=database, row_count=len(data), table=table_info.to_dict())
+                self.logger.logMessage(Logging.LogLevel.INFO, "Data inserted successfully", database=table_info.database, row_count=len(data), table=table_info.to_dict())
         except Exception as e:
             raise RuntimeError(f"Failed to insert data into YugabyteDB: {e}")
