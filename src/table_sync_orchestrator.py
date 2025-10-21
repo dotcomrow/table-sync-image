@@ -230,10 +230,11 @@ class TableSyncOrchestrator:
         
     # ------------------------------ Cache Check Thread ------------------------------
     
-    def check_cache_counts(self, db: str, logger: Logging, config: ConfigReader):
-        self.logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db, thread=threading.current_thread().name)
+    def check_cache_counts(self, db: str, config: ConfigReader):
+        logger = Logging(config)
+        logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
-        bigquery_manager = BigQueryManager(self.config, self.logger)
+        bigquery_manager = BigQueryManager(config, logger)
         tables: list[TableInfo] = yugabyte_manager._discover_tables(db)
         try:
             while True:
@@ -270,10 +271,11 @@ class TableSyncOrchestrator:
             
     # ------------------------------ Connector Cleanup Thread ------------------------------
     
-    def cleanup_connectors(self, db: str, logger: Logging, config: ConfigReader):
-        self.logger.logMessage(Logging.LogLevel.INFO, "Starting connector cleanup for database", database=db, thread=threading.current_thread().name)
-        yugabyte_manager = YugabyteDBManager(self.config, logger)
-        bigquery_manager = BigQueryManager(self.config, self.logger)
+    def cleanup_connectors(self, db: str, config: ConfigReader):
+        logger = Logging(config)
+        logger.logMessage(Logging.LogLevel.INFO, "Starting connector cleanup for database", database=db, thread=threading.current_thread().name)
+        yugabyte_manager = YugabyteDBManager(config, logger)
+        bigquery_manager = BigQueryManager(config, logger)
         kafka_connector = KafkaConnector(config, logger)
         try:
             while True:
@@ -306,8 +308,9 @@ class TableSyncOrchestrator:
         
     # ------------------------------ Prepare Database Thread ------------------------------
             
-    def prepare_database(self, db: str, logger: Logging, config: ConfigReader):
-        self.logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db, thread=threading.current_thread().name)
+    def prepare_database(self, db: str, config: ConfigReader):
+        logger = Logging(config)
+        logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
         try:
             yugabyte_manager.create_debezium_signal_table(db)
