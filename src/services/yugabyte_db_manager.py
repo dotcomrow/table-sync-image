@@ -20,7 +20,7 @@ class YugabyteDBManager:
         self.port = db_cfg.get('port', 5433)
         self.user = db_cfg.get('user', 'yugabyte')
         self.password = db_cfg.get('password', 'yugabyte')
-        self.yb_admin_utils = YBAdminUtils(self.config, self.logger)
+        self.yb_admin_utils = YBAdminUtils(self.config, logger)
         self.logger = logger
 
     def connect(self, database: str):
