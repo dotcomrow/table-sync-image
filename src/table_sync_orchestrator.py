@@ -94,7 +94,7 @@ class TableSyncOrchestrator:
         while not self._background_shutdown.is_set():
             try:
                 with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingDatabasePrepKeys.MAX_PREPARATION_THREADS.value, 4)) as executor:
-                    futures = {executor.submit(self.prepare_database, db, self.logger, self.config): db for db in databases}
+                    futures = {executor.submit(self.prepare_database, db): db for db in databases}
                     
                     for future in as_completed(futures):
                         if self._background_shutdown.is_set():
@@ -125,7 +125,7 @@ class TableSyncOrchestrator:
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "Running cache check cycle")
                 
                 with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingCacheCheckerKeys.MAX_CACHE_CHECK_THREADS.value, 4)) as executor:
-                    futures = {executor.submit(self.check_cache_counts, db, self.logger, self.config): db for db in databases}
+                    futures = {executor.submit(self.check_cache_counts, db): db for db in databases}
                     
                     for future in as_completed(futures):
                         if self._background_shutdown.is_set():
@@ -158,7 +158,7 @@ class TableSyncOrchestrator:
                 self.logger.logMessage(Logging.LogLevel.DEBUG, "Running connector cleanup cycle")
                 
                 with ThreadPoolExecutor(max_workers=self.config.get(ConfigKeys.PROCESSING.value, {}).get(ProcessingConnectorCleanerKeys.MAX_CONNECTOR_CLEANUP_THREADS.value, 4)) as executor:
-                    futures = {executor.submit(self.cleanup_connectors, db, self.logger, self.config): db for db in databases}
+                    futures = {executor.submit(self.cleanup_connectors, db): db for db in databases}
                     
                     for future in as_completed(futures):
                         if self._background_shutdown.is_set():
@@ -230,7 +230,8 @@ class TableSyncOrchestrator:
         
     # ------------------------------ Cache Check Thread ------------------------------
     
-    def check_cache_counts(self, db: str, config: ConfigReader):
+    def check_cache_counts(self, db: str):
+        config = ConfigReader(self.config_path).load_config()
         logger = Logging(config)
         logger.logMessage(Logging.LogLevel.INFO, "Checking cached row counts for tables in database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
@@ -271,7 +272,8 @@ class TableSyncOrchestrator:
             
     # ------------------------------ Connector Cleanup Thread ------------------------------
     
-    def cleanup_connectors(self, db: str, config: ConfigReader):
+    def cleanup_connectors(self, db: str):
+        config = ConfigReader(self.config_path).load_config()
         logger = Logging(config)
         logger.logMessage(Logging.LogLevel.INFO, "Starting connector cleanup for database", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
@@ -308,7 +310,8 @@ class TableSyncOrchestrator:
         
     # ------------------------------ Prepare Database Thread ------------------------------
             
-    def prepare_database(self, db: str, config: ConfigReader):
+    def prepare_database(self, db: str):
+        config = ConfigReader(self.config_path).load_config()
         logger = Logging(config)
         logger.logMessage(Logging.LogLevel.INFO, "Preparing database for sync", database=db, thread=threading.current_thread().name)
         yugabyte_manager = YugabyteDBManager(config, logger)
