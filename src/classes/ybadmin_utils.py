@@ -1,6 +1,7 @@
 import re
 import os
 import subprocess
+from typing import Optional, List, Set
 
 from classes.config_reader import ConfigKeys, YugabyteDBKeys
 from classes.logging import Logging
@@ -71,7 +72,7 @@ class YBAdminUtils:
         self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
     
-    def _run_yb_admin(self, master_addrs: str, args: list[str], timeout: int = 30) -> str:
+    def _run_yb_admin(self, master_addrs: str, args: List[str], timeout: int = 30) -> str:
         yb_admin_bin = self.config.get(
             ConfigKeys.YUGABYTEDB.value, {}
         ).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
@@ -115,7 +116,7 @@ class YBAdminUtils:
         self.logger.logMessage(Logging.LogLevel.DEBUG, "Resolved table ID", table_id=table_id, table=table_info.to_dict())
 
         # Helper to fetch table_ids for a stream
-        def _fetch_stream_table_ids() -> set[str]:
+        def _fetch_stream_table_ids() -> Set[str]:
             out = self._run_yb_admin(master_addrs, ["get_change_data_stream_info", stream_id], timeout=30)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin get_change_data_stream_info output", output=out)
             return set(re.findall(r'^\s*table_id:\s*"([0-9a-fA-F]+)"', out, flags=re.MULTILINE))
