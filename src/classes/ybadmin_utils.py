@@ -106,7 +106,7 @@ class YBAdminUtils:
         try:
             # 1) Resolve the table's UUID (works for YSQL)
             table_id = self.get_table_id(yb_admin_bin, table_info)
-
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Resolved table ID", table_id=table_id, table=table_info.to_dict())
             # 2) Describe the stream
             out = self._run_yb_admin(yb_admin_bin, master_addrs, ["describe_change_data_stream", stream_id])
             self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin describe_change_data_stream output", output=out)
