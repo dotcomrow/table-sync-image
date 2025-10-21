@@ -147,12 +147,8 @@ class YBAdminUtils:
                 matches.append(table_id)
 
         if not matches:
-            raise RuntimeError(
-                f"Table not found in yb-admin output for ysql.{table_info.database}.{expected_name}"
-            )
+            return -1
         if len(matches) > 1:
-            raise RuntimeError(
-                f"Multiple matches found for ysql.{table_info.database}.{expected_name}: {matches}"
-            )
+            return -1
 
         return matches[0]
