@@ -71,37 +71,109 @@ class YBAdminUtils:
         self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
     
+    def _run_yb_admin(yb_admin_bin: str, master_addrs: str, args: list[str], timeout: int = 20) -> str:
+        cmd = [yb_admin_bin, "--master_addresses", master_addrs] + args
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=timeout)
+        except subprocess.CalledProcessError as e:
+            # Include full output in the log and raise a clearer error
+            output = e.output or ""
+            raise RuntimeError(f"yb-admin failed ({' '.join(cmd)}):\n{output}") from e
+
     def verify_table_covered_by_stream(self, stream_id: str, table_info: TableInfo) -> bool:
-        """Verify if a table is covered by a given CDC stream using yb-admin."""
-        self.logger.logMessage(Logging.LogLevel.DEBUG, "Verifying table coverage by CDC stream", stream_id=stream_id, table=table_info.to_dict())
+        """Verify if a table is covered by a given CDC stream using yb-admin describe_change_data_stream."""
+        self.logger.logMessage(
+            Logging.LogLevel.DEBUG,
+            "Verifying table coverage by CDC stream",
+            stream_id=stream_id,
+            table=table_info.to_dict(),
+        )
 
         master_addrs = (
-            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
+            self.config.get(ConfigKeys.YUGABYTEDB.value, {})
+            .get(YugabyteDBKeys.MASTER_ADDRESSES.value)
             or os.getenv("YB_MASTER_ADDRESSES")
         )
         if not master_addrs:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured")
             raise ValueError("Master addresses not configured")
 
-        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
+        yb_admin_bin = self.config.get(
+            ConfigKeys.YUGABYTEDB.value, {}
+        ).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
         self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin binary resolved", yb_admin_bin=yb_admin_bin)
 
         try:
+            # 1) Resolve the table's UUID (works for YSQL)
             table_id = self.get_table_id(yb_admin_bin, table_info)
-            out = subprocess.check_output(
-                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_stream_tables", stream_id],
-                text=True, stderr=subprocess.STDOUT, timeout=20
+
+            # 2) Describe the stream
+            out = _run_yb_admin(yb_admin_bin, master_addrs, ["describe_change_data_stream", stream_id], timeout=30)
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin describe_change_data_stream output", output=out)
+
+            # 3) Parse: collect table_ids (if table-level) and/or namespace info (if db-level)
+            #    Examples seen in output:
+            #      table_id: 000033ee0000abcd00001234...
+            #      db_type: YSQL
+            #      namespace_name: mcp
+            table_ids = set(re.findall(r"\btable_id:\s*([0-9a-fA-F]+)\b", out))
+            db_type = None
+            namespace = None
+
+            m = re.search(r"\bdb_type:\s*(\w+)", out)
+            if m:
+                db_type = m.group(1).upper()
+
+            m = re.search(r"\bnamespace_name:\s*([A-Za-z0-9_\-]+)", out)
+            if m:
+                namespace = m.group(1)
+
+            # 4) Decide coverage
+            if table_ids:
+                # Table-level stream: membership must include our table_id
+                covered = table_id in table_ids
+                self.logger.logMessage(
+                    Logging.LogLevel.DEBUG,
+                    "Table-level stream coverage check",
+                    table_id=table_id,
+                    covered=covered,
+                    stream_table_ids=list(table_ids),
+                )
+                return covered
+
+            # No table_ids listed → likely a DB/namespace-level stream
+            if (db_type == "YSQL") and (namespace == table_info.database):
+                self.logger.logMessage(
+                    Logging.LogLevel.DEBUG,
+                    "Namespace-level stream coverage check",
+                    db_type=db_type,
+                    namespace=namespace,
+                    database=table_info.database,
+                    covered=True,
+                )
+                return True
+
+            # Fallback: not covered
+            self.logger.logMessage(
+                Logging.LogLevel.DEBUG,
+                "Stream does not cover table",
+                reason="No matching table_ids and namespace/db mismatch",
+                db_type=db_type,
+                namespace=namespace,
+                database=table_info.database,
             )
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin list_change_data_stream_tables output", output=out)
-            for line in out.splitlines():
-                if table_id in line:
-                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is covered by CDC stream", stream_id=stream_id, table=table_info.to_dict())
-                    return True
-            self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is NOT covered by CDC stream", stream_id=stream_id, table=table_info.to_dict())
             return False
-        except subprocess.CalledProcessError as e:
-            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to verify table coverage by CDC stream", error=str(e))
-            raise RuntimeError(f"Failed to verify table coverage by CDC stream: {e}")
+
+        except Exception as e:
+            # Ensure we surface details (including yb-admin stdout/stderr if wrapped above)
+            self.logger.logMessage(
+                Logging.LogLevel.ERROR,
+                "Failed to verify table coverage by CDC stream",
+                error=str(e),
+                stream_id=stream_id,
+                table=table_info.to_dict(),
+            )
+            raise
         
     def get_table_id(self, yb_admin_bin: str, table_info: TableInfo) -> str:
         """
