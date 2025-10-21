@@ -7,6 +7,7 @@ from classes.config_reader import ConfigKeys, YugabyteDBKeys
 from classes.table_info import TableInfo
 from classes.table_annotation import TableAnnotation
 from classes.logging import Logging
+from classes.ybadmin_utils import YBAdminUtils
 
 class YugabyteDBManager:
     debezium_signal_id_format = "snap_{schema}_{table}"
@@ -130,6 +131,11 @@ class YugabyteDBManager:
 
     def _discover_tables(self, database: str) -> List[TableInfo]:
         """Discover all tables in all schemas of the specified database."""
+        stream_id = self.stream_exists(database)
+        if not stream_id:
+            self.logger.logMessage(Logging.LogLevel.WARNING, "No CDC stream found for database during table discovery", database=database)
+            return []
+
         self.logger.logMessage(Logging.LogLevel.INFO, "Discovering tables in database available for sync", database=database)
         out: List[TableInfo] = []
         try:
@@ -162,7 +168,12 @@ class YugabyteDBManager:
                         continue
                     
                     ann = TableAnnotation.from_comment(row['table_comment']) if row['table_comment'] else None
-                    out.append(TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann))
+                    table = TableInfo(database=database, schema=row['table_schema'], table=row['table_name'], annotation=ann)
+                    if YBAdminUtils.verify_table_covered_by_stream(stream_id, table):
+                        self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is covered by CDC stream and added to sync candidates", table=table.to_dict())
+                        out.append(table)
+                    else:
+                        self.logger.logMessage(Logging.LogLevel.INFO, "Skipping table - not covered by CDC stream", schema=row['table_schema'], table=row['table_name'])
         except Exception as e:
             self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to discover tables", database=database, error=str(e))
         return out

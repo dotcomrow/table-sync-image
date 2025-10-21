@@ -4,6 +4,7 @@ import subprocess
 
 from classes.config_reader import ConfigKeys, YugabyteDBKeys
 from classes.logging import Logging
+from classes.table_info import TableInfo
 
 class YBAdminUtils:
     def __init__(self, config, logger: Logging):
@@ -69,3 +70,89 @@ class YBAdminUtils:
 
         self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to create CDC stream: No stream ID found")
         raise RuntimeError("Failed to create CDC stream: No stream ID found")
+    
+    def verify_table_covered_by_stream(self, stream_id: str, table_info: TableInfo) -> bool:
+        """Verify if a table is covered by a given CDC stream using yb-admin."""
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "Verifying table coverage by CDC stream", stream_id=stream_id, table=table_info.to_dict())
+
+        master_addrs = (
+            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
+            or os.getenv("YB_MASTER_ADDRESSES")
+        )
+        if not master_addrs:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured")
+            raise ValueError("Master addresses not configured")
+
+        yb_admin_bin = self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.YB_ADMIN_PATH.value, "yb-admin")
+        self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin binary resolved", yb_admin_bin=yb_admin_bin)
+
+        try:
+            table_id = self.get_table_id(yb_admin_bin, table_info)
+            out = subprocess.check_output(
+                [yb_admin_bin, "--master_addresses", master_addrs, "list_change_data_stream_tables", stream_id],
+                text=True, stderr=subprocess.STDOUT, timeout=20
+            )
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin list_change_data_stream_tables output", output=out)
+            for line in out.splitlines():
+                if table_id in line:
+                    self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is covered by CDC stream", stream_id=stream_id, table=table_info.to_dict())
+                    return True
+            self.logger.logMessage(Logging.LogLevel.DEBUG, "Table is NOT covered by CDC stream", stream_id=stream_id, table=table_info.to_dict())
+            return False
+        except subprocess.CalledProcessError as e:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Failed to verify table coverage by CDC stream", error=str(e))
+            raise RuntimeError(f"Failed to verify table coverage by CDC stream: {e}")
+        
+    def get_table_id(self, yb_admin_bin: str, table_info: TableInfo) -> str:
+        """
+        Expects table_info.database, table_info.schema, table_info.table
+        Returns the Yugabyte table UUID for ysql.<db>.<schema>.<table>.
+        """
+        master_addrs = (
+            self.config.get(ConfigKeys.YUGABYTEDB.value, {}).get(YugabyteDBKeys.MASTER_ADDRESSES.value)
+            or os.getenv("YB_MASTER_ADDRESSES")
+        )
+        if not master_addrs:
+            self.logger.logMessage(Logging.LogLevel.ERROR, "Master addresses not configured")
+            raise ValueError("Master addresses not configured")
+        
+        cmd = [
+            yb_admin_bin,
+            "--master_addresses", master_addrs,
+            "list_tables", "include_db_type", "include_table_id",
+        ]
+        out = subprocess.check_output(cmd, text=True)  # text=True -> str instead of bytes
+
+        expected_prefix = f"ysql.{table_info.database}."
+        expected_name = f"{table_info.schema}.{table_info.table}"
+
+        matches = []
+
+        for line in out.splitlines():
+            # Each line looks like:
+            # ysql.<db>.<schema>.<table> <table_id> <table_type>
+            parts = line.strip().split()
+            if len(parts) < 3:
+                continue
+
+            fq_name, table_id, _table_type = parts[0], parts[1], parts[2]
+
+            if not fq_name.startswith(expected_prefix):
+                continue
+
+            # fq_name is "ysql.<db>.<schema>.<table>" but schema+table is one token with a dot.
+            # Split "ysql.<db>." off and compare the remainder to "<schema>.<table>"
+            remainder = fq_name.split('.', 2)[-1]  # "<schema>.<table>"
+            if remainder == expected_name:
+                matches.append(table_id)
+
+        if not matches:
+            raise RuntimeError(
+                f"Table not found in yb-admin output for ysql.{table_info.database}.{expected_name}"
+            )
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple matches found for ysql.{table_info.database}.{expected_name}: {matches}"
+            )
+
+        return matches[0]
