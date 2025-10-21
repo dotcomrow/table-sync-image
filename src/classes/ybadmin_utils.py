@@ -108,7 +108,7 @@ class YBAdminUtils:
             table_id = self.get_table_id(yb_admin_bin, table_info)
 
             # 2) Describe the stream
-            out = _run_yb_admin(yb_admin_bin, master_addrs, ["describe_change_data_stream", stream_id], timeout=30)
+            out = self._run_yb_admin(yb_admin_bin, master_addrs, ["describe_change_data_stream", stream_id], timeout=30)
             self.logger.logMessage(Logging.LogLevel.DEBUG, "yb-admin describe_change_data_stream output", output=out)
 
             # 3) Parse: collect table_ids (if table-level) and/or namespace info (if db-level)
