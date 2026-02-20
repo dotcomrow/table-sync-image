@@ -18,7 +18,7 @@ structlog==23.2.0            # Structured logging (used by major companies)
 google-cloud-logging==3.8.0  # Google Cloud Logging integration
 
 # Monitoring & Health Checks - Proven Solutions
-flask==3.0.0                 # Lightweight web framework for health checks
+flask==3.1.3                 # Lightweight web framework for health checks
 prometheus_client            # Prometheus client library
 
 # JSON Processing - Built into Python
